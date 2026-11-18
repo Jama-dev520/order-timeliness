@@ -1,0 +1,246 @@
+# 订单时效看板 —— 私有 K8S 部署清单
+#
+# 不要直接 apply 这个文件（里面有 __IMAGE__ 之类的占位符）：
+#   cp k8s/deploy.env.example k8s/deploy.env   # 填 4 个值
+#   python k8s/render.py                       # 生成 k8s/rendered/oc-timeliness.yaml
+#   kubectl apply -f k8s/secret.yaml           # 先按 secret.example.yaml 填好
+#   kubectl apply -f k8s/rendered/oc-timeliness.yaml
+#
+# 结构：
+#   Namespace + ConfigMap + PVC + Deployment(serve) + Service + CronJob(抓数) + Ingress
+#
+# 地址固定性（这是部署到集群的唯一理由）：
+#   Ingress 的 host 是集群侧的声明式配置，和任何进程无关。
+#   Pod 重启、节点漂移、换镜像、本机关机，都不影响这个地址。
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: oc-timeliness
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oc-timeliness-config
+  namespace: oc-timeliness
+data:
+  # 固定起始日：所有统计都从这天算起，改这里要同步重启服务（不是必须，页面实时读）
+  # ⚠️ 后台 startDate 有硬下限（约「今天往前 17 天」）。这个是固定日期，会随时间失效：
+  #    失效后 scraper 的守卫会直接报错（而不是静默拉全库 2.5 万单）。
+  #    长期部署建议改成滚动窗口：删掉这行、用 OC_DAYS=16 代替。
+  OC_START_DATE: "2026/10/19"
+  # 两条口径：汇总（KPI + 图表）与明细（底部表格）可以不同起点
+  OC_KPI_START: "2026/10/29"
+  OC_DETAIL_START: "2026/10/19"
+  # all = UK + US 合并（后台 All tab）
+  OC_REGION: "us"
+  # 页面缓存秒数（只影响 /api/status 的展示，数据靠文件 mtime 热重载）
+  OC_CACHE_TTL: "600"
+  TZ: "Asia/Shanghai"
+  # 取消清单页输出到共享卷，服务端从 /app/data 读
+  STUCK_HTML_OUT: "/app/data/stuck_shipcc.html"
+---
+# 数据卷：orders.json / stuck_shipcc.json / stuck_shipcc.html 都在这
+#
+# 注意 ReadWriteOnce：Deployment 与 CronJob 必须调度到同一节点才挂得上。
+# 单节点集群没问题；多节点请换成支持 RWX 的存储（NFS / CephFS / 云盘 NAS）。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: oc-timeliness-data
+  namespace: oc-timeliness
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+  # 留空则不写该字段（走集群默认 StorageClass），由 render.py 处理
+  storageClassName: "__STORAGE_CLASS__"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oc-timeliness
+  namespace: oc-timeliness
+  labels:
+    app: oc-timeliness
+spec:
+  # 只能 1 副本：内存里有快照缓存，且 PVC 是 RWO
+  replicas: 1
+  strategy:
+    type: Recreate          # RWO 卷不能滚动更新，Recreate 更稳
+  selector:
+    matchLabels:
+      app: oc-timeliness
+  template:
+    metadata:
+      labels:
+        app: oc-timeliness
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          # 用 command 而不是 args：镜像没有 ENTRYPOINT，args 只会替换 CMD 里的一项
+          command: ["python", "serve.py", "--host", "0.0.0.0", "--port", "8000", "--no-fetch"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: oc-timeliness-config
+            - secretRef:
+                name: oc-timeliness-secret
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # 就绪：内存里得有快照（没数据返回 503，先不接流量）
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            failureThreshold: 3
+          # 存活：只探端口。数据没就绪时 /healthz 是 503，不能拿它做 liveness，
+          # 否则首次部署没数据会被反复重启
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: oc-timeliness-data
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oc-timeliness
+  namespace: oc-timeliness
+spec:
+  # 走 Ingress 用 ClusterIP；只想集群内访问也可改成 NodePort 并加 nodePort: 30xxx
+  type: ClusterIP
+  selector:
+    app: oc-timeliness
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# 定时抓数：每 30 分钟把订单与取消清单刷新一遍，写到共享卷；
+# serve 侧靠文件 mtime 变化自动热重载，不需要重启 Pod。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oc-timeliness-refresh
+  namespace: oc-timeliness
+spec:
+  schedule: "*/30 * * * *"
+  timeZone: "Asia/Shanghai"
+  concurrencyPolicy: Forbid        # 上一轮没跑完就跳过，避免抢同一个卷
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800  # 抓 400+ 单事件约 2–5 分钟，留足余量
+      template:
+        metadata:
+          labels:
+            app: oc-timeliness-refresh
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: refresh
+              image: __IMAGE__
+              imagePullPolicy: IfNotPresent
+              command: ["python", "refresh_all.py"]
+              envFrom:
+                - configMapRef:
+                    name: oc-timeliness-config
+                - secretRef:
+                    name: oc-timeliness-secret
+              volumeMounts:
+                - name: data
+                  mountPath: /app/data
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: oc-timeliness-data
+            - name: tmp
+              emptyDir: {}
+---
+# 对外入口。没有 Ingress Controller 就删掉这段，把 Service 改 NodePort。
+# 这个 host 就是以后的固定地址：换 Pod、换镜像、本机关机都不会变。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oc-timeliness
+  namespace: oc-timeliness
+  annotations:
+    # nginx-ingress；其它控制器（Traefik / APISIX / higress）按需替换
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    #__CERT_ISSUER_ANNOTATION__
+spec:
+  ingressClassName: __INGRESS_CLASS__
+  #__TLS_BLOCK__
+  rules:
+    - host: __HOST__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oc-timeliness
+                port:
+                  number: 80

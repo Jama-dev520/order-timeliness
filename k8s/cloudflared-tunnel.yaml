@@ -1,0 +1,133 @@
+# 可选组件：给「仅内网」的集群补一条外网入口
+#
+# 什么时候需要它：
+#   集群的 Ingress 只在内网/VPN 内可解析，但你要让不连 VPN 的人也能打开看板。
+#
+# 它和本机那个 trycloudflare 快速隧道的区别：
+#   快速隧道 = 随机域名 + 绑进程，进程死域名永久回收
+#   这里 = 你自己的域名 + Cloudflare 托管，cloudflared 只是"客户端"，
+#          Pod 重启、节点漂移、换镜像都会用同一个域名重连，地址永久固定
+#
+# 前提（缺一不可）：
+#   1. 一个域名，NS 托管在 Cloudflare（.com 按成本价约 ¥70/年）
+#   2. Cloudflare 账号 → Zero Trust → Networks → Tunnels → 新建 tunnel
+#   3. 在该 tunnel 的 Public Hostname 里加一条：
+#        Subdomain: oc          Domain: 你的域名
+#        Service:   http://oc-timeliness.oc-timeliness.svc.cluster.local:80
+#      保存后 Cloudflare 会自动建好 DNS 记录和证书
+#   4. 复制 tunnel 的 token（很长的一串 eyJ...）
+#
+# 用法：
+#   把下面的 TOKEN 换成真实值后：
+#   kubectl apply -f k8s/cloudflared-tunnel.yaml
+#   kubectl -n oc-timeliness logs -f deploy/cloudflared      # 看到 Registered tunnel connection 即成功
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflared-token
+  namespace: oc-timeliness
+type: Opaque
+stringData:
+  # token 里有账号凭据，别提交到 git；也可以改用
+  # kubectl -n oc-timeliness create secret generic cloudflared-token --from-literal=TUNNEL_TOKEN='eyJ...'
+  TUNNEL_TOKEN: "在这里粘贴 Zero Trust 里那条 tunnel 的 token"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: oc-timeliness
+  labels:
+    app: cloudflared
+spec:
+  replicas: 2                 # 两条连接互为主备，Cloudflare 侧自动负载/故障切换
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cloudflared
+          # 私有仓库拉不到 Docker Hub 就先 docker pull 再 retag 推到自己的 harbor
+          image: cloudflare/cloudflared:2026.10.7
+          imagePullPolicy: IfNotPresent
+          # 本机实测这台网络 UDP 7844 不通，必须 http2；集群若放通 QUIC 可去掉该参数
+          # --metrics 必须显式绑 0.0.0.0：默认只监听 127.0.0.1，kubelet 探针从节点侧访问会失败
+          args:
+            - tunnel
+            - --no-autoupdate
+            - --protocol
+            - http2
+            - --metrics
+            - 0.0.0.0:2000
+            - run
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared-token
+                  key: TUNNEL_TOKEN
+            - name: TZ
+              value: Asia/Shanghai
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # cloudflared 自带 /ready 端点：连上边缘才 200
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 2000
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 2000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
+          ports:
+            - name: metrics
+              containerPort: 2000
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# 指标端口只给 Prometheus 用，集群没装监控可以不建这个 Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudflared-metrics
+  namespace: oc-timeliness
+  labels:
+    app: cloudflared
+spec:
+  type: ClusterIP
+  selector:
+    app: cloudflared
+  ports:
+    - name: metrics
+      port: 2000
+      targetPort: metrics

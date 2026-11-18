@@ -1,0 +1,93 @@
+name: refresh-dashboard
+
+# 每 2 小时抓一次数并重新发布 => GitHub Pages
+# 手动：仓库 Actions 页 → refresh-dashboard → Run workflow
+#
+# 需要配置的 Secrets（Settings → Secrets and variables → Actions）：
+#   OC_COOKIE          登录态，形如 hk-sit=xxxxxxxx-xxxx-...（约 4 天过期，失效后本 job 会失败提醒你）
+#   OC_SITE_PASSWORD   看板访问口令，浏览器解密 data.bin 用
+#
+# Pages 设置：Settings → Pages → Source 选「GitHub Actions」
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '这次手动触发的原因（只写进日志）'
+        required: false
+        default: '手动刷新'
+
+concurrency:
+  group: refresh-dashboard
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 写入配置
+        env:
+          OC_COOKIE: ${{ secrets.OC_COOKIE }}
+          OC_SITE_PASSWORD: ${{ secrets.OC_SITE_PASSWORD }}
+        run: |
+          if [ -z "$OC_COOKIE" ]; then echo "缺少 OC_COOKIE Secret"; exit 1; fi
+          if [ -z "$OC_SITE_PASSWORD" ]; then echo "缺少 OC_SITE_PASSWORD Secret"; exit 1; fi
+          cat > .env <<EOF
+          OC_COOKIE=$OC_COOKIE
+          OC_REGION=us
+          OC_DAYS=14
+          OC_START_DATE=2026/10/19
+          OC_KPI_START=2026/10/29
+          OC_DETAIL_START=2026/10/19
+          OC_SITE_PASSWORD=$OC_SITE_PASSWORD
+          EOF
+          mkdir -p data logs
+          echo "配置已写入（cookie 长度 ${#OC_COOKIE}）"
+
+      - name: 先探一次接口（失败即停，避免白跑 15 分钟）
+        run: python login_browser.py --check
+
+      - name: 抓数 + 重算异常清单
+        run: python -u refresh_all.py
+
+      - name: 生成加密站点
+        run: python build_site.py --out site
+
+      - name: 自检产物
+        run: |
+          test -s site/index.html || { echo "index.html 缺失"; exit 1; }
+          test -s site/data.bin    || { echo "data.bin 缺失"; exit 1; }
+          # 双保险：模板里不能残留业务数据
+          if grep -q '"ocOrderNo"' site/index.html; then
+            echo "index.html 里残留了订单数据，拒绝发布"; exit 1
+          fi
+          ls -lh site/
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,15 @@
+# 构建上下文瘦身：镜像里只要 *.py + requirements.txt
+.env
+.env.example
+data/
+logs/
+bin/
+.cdp-profile/
+*.html
+*.log
+*.csv
+*.json
+k8s/
+.git/
+__pycache__/
+*.pyc

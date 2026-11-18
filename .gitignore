@@ -1,0 +1,23 @@
+# 凭证与登录态：绝不入库
+.env
+.env.local
+.env.*.local
+data/_auth_state.json
+.cdp-profile/
+.pw-profile/
+
+# 运行产物
+data/*.csv
+data/*.json
+!data/.gitkeep
+logs/
+__pycache__/
+*.pyc
+bin/
+*.log
+dashboard.html
+# 本地生成的报表/临时页（根目录与 data/ 下的 html 都不入库；site/ 是发布产物，单独放行）
+*.html
+!site/index.html
+_data_tmp/
+

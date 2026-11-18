@@ -1,0 +1,3 @@
+requests>=2.31,<3
+# build_site.py 加密部署版用：PBKDF2 + AES-256-GCM
+cryptography>=42,<52
