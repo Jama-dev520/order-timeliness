@@ -76,21 +76,25 @@ jobs:
             echo "这些地址不进仓库，必须配在 Settings → Secrets and variables → Actions"
             exit 1
           fi
-          cat > .env <<EOF
-          OC_COOKIE=$OC_COOKIE
-          OC_REGION=us
-          OC_DAYS=14
-          OC_START_DATE=2026/10/19
-          OC_KPI_START=2026/10/29
-          OC_DETAIL_START=2026/10/19
-          OC_SITE_PASSWORD=$OC_SITE_PASSWORD
-          OC_HOST_US=$OC_HOST_US
-          OC_HOST_UK=$OC_HOST_UK
-          OC_HOST_AU=$OC_HOST_AU
-          OC_PORTAL=$OC_PORTAL
-          OC_SSO_URL=$OC_SSO_URL
-          OC_DEPOP_TRACK=$OC_DEPOP_TRACK
-          EOF
+          # 注意：不要用 heredoc。YAML 块标量会把每行加上缩进，而 heredoc 的结束标记
+          # 必须顶格，缩进版 EOF 永远匹配不上，会把后续所有行吞进 .env 且不报错。
+          {
+            echo "OC_COOKIE=$OC_COOKIE"
+            echo "OC_REGION=us"
+            echo "OC_DAYS=14"
+            # 写死起点是为了口径稳定（和本地看板一致）；后端对 startDate 有下限，
+            # 超出时 refresh_all.py 会自动收缩窗口重试一次，不会把 job 跑挂。
+            echo "OC_START_DATE=2026/10/19"
+            echo "OC_KPI_START=2026/10/29"
+            echo "OC_DETAIL_START=2026/10/19"
+            echo "OC_SITE_PASSWORD=$OC_SITE_PASSWORD"
+            echo "OC_HOST_US=$OC_HOST_US"
+            echo "OC_HOST_UK=$OC_HOST_UK"
+            echo "OC_HOST_AU=$OC_HOST_AU"
+            echo "OC_PORTAL=$OC_PORTAL"
+            echo "OC_SSO_URL=$OC_SSO_URL"
+            echo "OC_DEPOP_TRACK=$OC_DEPOP_TRACK"
+          } > .env
           mkdir -p data logs
           echo "配置已写入（cookie 长度 ${#OC_COOKIE}）"
 

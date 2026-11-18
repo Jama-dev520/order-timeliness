@@ -16,8 +16,11 @@ __pycache__/
 bin/
 *.log
 dashboard.html
-# 本地生成的报表/临时页（根目录与 data/ 下的 html 都不入库；site/ 是发布产物，单独放行）
+# 本地生成的报表/临时页（根目录与 data/ 下的 html 都不入库）
 *.html
-!site/index.html
 _data_tmp/
+
+# 发布产物：由 Actions 每次现场 build（build_site.py --out site），不入库。
+# 仓库里留着旧的 data.bin 只会让 clone 变大，而且口令一换旧密文就是垃圾。
+site/
 
