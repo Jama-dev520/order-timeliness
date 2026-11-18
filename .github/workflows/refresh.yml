@@ -11,7 +11,8 @@ name: refresh-dashboard
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    # 避开整点：GitHub 的 schedule 在 0 分最拥堵，实测常延迟 10~30 分钟甚至跳过
+    - cron: '23 */2 * * *'
   workflow_dispatch:
     inputs:
       reason:
