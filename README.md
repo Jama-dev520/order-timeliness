@@ -7,27 +7,33 @@
 
 后台那个 `UK | All | US` 不是前端过滤，而是**三份独立数据**，各自一台 API 主机（同一个 `hk-sit` cookie 通用）：
 
-| tab | API 主机 | RDC 出库码 | SPX 提取码 | 当前单量（10/29 起） |
+| tab | API 主机（由环境变量提供） | RDC 出库码 | SPX 提取码 | 当前单量（10/29 起） |
 |---|---|---|---|---|
-| `UK` | `spk-hub-uk-api.orangeconnex.com` | `DFDLUK002`（占位） | `SCAUK002`（占位） | 367 |
+| `UK` | `OC_HOST_UK` | `DFDLUK002`（占位） | `SCAUK002`（占位） | 367 |
 | `All` | 上面两台合并 | — | — | 468 |
-| `US` | `spk-hub-us-api.orangeconnex.com` | **`DFDLUS002`** | **`SCAUS002`** | 101 |
+| `US` | `OC_HOST_US` | **`DFDLUS002`** | **`SCAUS002`** | 101 |
+
+> **后台地址刻意不进本仓库。** 代码里没有任何内部域名，主机/门户/SSO 全部从环境变量读，
+> 见「配置」一节的 `OC_HOST_US` / `OC_HOST_UK` / `OC_PORTAL` / `OC_SSO_URL`。
+> 本文件里出现的 `<US-API-HOST>`、`<PORTAL-HOST>` 等都是占位符，实际值填在 `.env` 或 GitHub Secret 里。
+> 好处是仓库可以公开镜像/分享而不泄露内网系统地址；代价是**少了配置就会直接报错**，
+> 报错信息会告诉你缺哪个变量。
 
 `All` 在脚本里就是 UK + US 两次抓取后合并。看板默认落在 `US` tab，`?region=UK` / `?region=ALL` 可直连某个 tab。
 
 ### 取数路径（与人工操作完全同一条）
 
 ```
-sso-portal-hk.orangeconnex.com/login        # LDAP 账号 + 4 位验证码
+<SSO-HOST>/login                            # LDAP 账号 + 4 位验证码
   → 门户 /main 点「SPK-UK智慧物流管理系统」
-  → oc-uk.orangeconnex.com/orderManage/OrderComplexQuery
+  → <PORTAL-HOST>/orderManage/OrderComplexQuery
   → 右上角选 US → 点「搜 索」
 ```
 
 页面右上角切 US 后发出的请求，正是脚本用的那条（已用浏览器抓包核对）：
 
 ```
-GET https://spk-hub-us-api.orangeconnex.com/aquarius-order/order/tracking-number/v1/tracking-number-list
+GET https://<US-API-HOST>/aquarius-order/order/tracking-number/v1/tracking-number-list
     ?startDate=...&endDate=...&page=1&limit=10
 ```
 
@@ -314,7 +320,7 @@ python backfill_firstscan.py             # 写回 orders.json / orders.csv
 ```
 PREFIX = /aquarius-order
 
-GET https://spk-hub-us-api.orangeconnex.com{PREFIX}/order/tracking-number/v1/tracking-number-list
+GET https://<US-API-HOST>{PREFIX}/order/tracking-number/v1/tracking-number-list
     ?page=1&limit=100
     &startDate=2026/10/20 00:00:00
     &endDate=2026/11/03 23:59:59
@@ -322,12 +328,12 @@ GET https://spk-hub-us-api.orangeconnex.com{PREFIX}/order/tracking-number/v1/tra
 GET {同上}{PREFIX}/order/tracking-number/v1/tracking-event-list/{trackingNumber}
 ```
 
-鉴权：Cookie `hk-sit=...`（`oc-uk.orangeconnex.com` 登录后拿到，跨区通用）。
+鉴权：Cookie `hk-sit=...`（`<PORTAL-HOST>` 登录后拿到，跨区通用）。
 
 ### 踩过的坑
 
 1. **网关前缀必须是 `/aquarius-order`**，缺了它一律 404（单靠猜 `api` / `gateway` 猜不到）。
-2. **区域由右上角 tab 决定**：US 数据只在 `spk-hub-us-api`，`spk-hub-uk-api` 上是另一批跨境单。
+2. **区域由右上角 tab 决定**：US 数据只在 US 主机（`OC_HOST_US`），UK 主机（`OC_HOST_UK`）上是另一批跨境单。
 3. **日期必须带时间**：`2026/10/20 00:00:00`，只给日期会返回 0 单。`limit` 上限 100。
 4. **必须 GET**，POST 返回 405。
 5. **时区：`+04:00` 就是 UTC+4，不是 UTC-4**，别把符号想反。事件 `oprTimeWithZone` 恒标 `+04:00`，
@@ -757,7 +763,7 @@ cloudflared 只是个连出去的客户端。Pod 重启、换节点、换镜像�
 - **只能 1 副本**：内存里有快照缓存，PVC 是 `ReadWriteOnce`，`strategy: Recreate`
 - **Deployment 与 CronJob 必须同节点**：RWO 卷不能同时挂两个节点。多节点集群换成
   RWX 存储（NFS / CephFS / NAS），或把抓数改成服务内置定时器（`serve.py` 不设只读时可用）
-- **必须能出网**：容器要访问 `spk-hub-us-api` / `spk-hub-uk-api.orangeconnex.com:443`，
+- **必须能出网**：容器要访问 `<US-API-HOST>` / `<UK-API-HOST>`:443，
   私有集群记得配出口或 NAT
 - **接口有跨窗口限制**：`startDate` 跨度过大时后端会返回全库数（`total≈25000`），
   抓取会变慢。当前默认从 `OC_START_DATE` 起，跨度建议不超 14 天
@@ -970,6 +976,14 @@ K8S 那边没有浏览器，CronJob 用的是 Secret 里的 cookie，过期后 J
 ## 配置（`.env`）
 
 ```
+# ---- 后台地址：必填，代码里没有默认值（不写死是为了仓库能公开分享）----
+OC_HOST_US=https://...     # US 区域接口主机根地址
+OC_HOST_UK=https://...     # UK 区域接口主机根地址（OC_REGION=us 时用不到）
+OC_HOST_AU=https://...     # AU 区域接口主机根地址（用不到可留空）
+OC_PORTAL=https://...      # 后台门户地址：Referer / Origin + login_browser 走查
+OC_SSO_URL=https://...     # SSO 登录入口：login_browser 打开的那个页面
+OC_DEPOP_TRACK=https://... # Depop 对外轨迹页域名；不填则明细表不显示 ↗ 外链
+
 OC_REGION=us           # us / uk / au / all（当前固定 us，只看美国；all = 后台 All tab）
 OC_COOKIE=hk-sit=...
 OC_DAYS=14
@@ -980,6 +994,23 @@ OC_SITE_PASSWORD=口令      # 加密部署版：build_site.py 用它加密 data
 # OC_USER=域账号      # 默认不启用，见上文「账号密码刻意不保存」
 # OC_PASS=密码
 ```
+
+### 为什么地址不进代码
+
+`OC_HOST_*` / `OC_PORTAL` / `OC_SSO_URL` 在代码里**没有默认值**，全部运行时从 `.env`
+（或 GitHub Secret）读。原因只有一个：仓库要能公开镜像，而内部系统地址一旦提交就会
+进 git 历史和搜索引擎索引，删不干净。
+
+代价是**少了配置会直接报错**，不是静默失败：
+
+| 缺什么 | 表现 |
+|---|---|
+| `OC_HOST_US` | `SystemExit: 缺少接口主机：请在 .env 里设置 OC_HOST_US=...` |
+| `OC_PORTAL` | 请求不带 `Referer`/`Origin`（一般不致命，但网关可能拒） |
+| `OC_SSO_URL` | 续期时直接提示「缺少 OC_SSO_URL」，不会开空浏览器 |
+| `OC_DEPOP_TRACK` | 明细表的 Depop `↗` 外链整体不渲染（不报错） |
+
+抓数入口 `_url()` 在拼 URL 前会检查主机，绝不会拼出 `/aquarius-order/...` 这种相对路径去撞墙。
 
 ### 凭证相关文件
 

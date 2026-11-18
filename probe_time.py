@@ -4,6 +4,7 @@
 结论口径：同一绝对时刻若被两个字段独立交叉验证，则该字段可信。
 """
 import json
+import os
 import re
 import urllib.request
 import urllib.parse
@@ -12,7 +13,28 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 BJ = timezone(timedelta(hours=8))
-HOST = "spk-hub-us-api.orangeconnex.com"
+
+
+def _env(key, default=""):
+    """读 .env（环境变量优先）。探针脚本刻意不 import scraper，自己读一次。"""
+    v = (os.environ.get(key) or "").strip()
+    if v:
+        return v
+    try:
+        for line in open(".env", encoding="utf-8"):
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, val = line.split("=", 1)
+            if k.strip() == key:
+                return val.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return default
+
+
+# 主机地址从环境变量取，仓库里不写死内部域名（只留裸域名，不带 scheme）
+HOST = _env("OC_HOST_US").split("://", 1)[-1].rstrip("/")
 
 
 def load_ck():

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -45,10 +46,37 @@ STATE_FILE = BASE / "data" / "_auth_state.json"
 # 已登录会话都存在这里，下次弹窗时账号密码自动填充，人只需要输 4 位验证码。
 # 有了它就不必把明文密码写进 .env。
 PROFILE_DIR = BASE / ".pw-profile"
-SSO_URL = "https://sso-portal-hk.orangeconnex.com/"
-PORTAL_MAIN = "https://sso-portal-hk.orangeconnex.com/main"
+
+
+def _env_val(key: str, default: str = "") -> str:
+    """取配置：真实环境变量优先，其次 .env。
+
+    两个来源都要看：本机是 .env，Actions 里也是先写 .env 再跑脚本。
+    """
+    v = (os.environ.get(key) or "").strip()
+    if v:
+        return v
+    try:
+        text = ENV_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return default
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, val = line.split("=", 1)
+        if k.strip() == key:
+            return val.strip().strip('"').strip("'")
+    return default
+
+
+# 登录入口与后台地址同样不写死在仓库里，统一由 OC_SSO_URL / OC_PORTAL 提供。
+_SSO = _env_val("OC_SSO_URL").rstrip("/")
+_PORTAL = _env_val("OC_PORTAL").rstrip("/")
+SSO_URL = f"{_SSO}/" if _SSO else ""
+PORTAL_MAIN = f"{_SSO}/main" if _SSO else ""
 APP_TITLE = "SPK-UK智慧物流管理系统"          # 门户里的应用卡片标题
-ORDER_QUERY = "https://oc-uk.orangeconnex.com/orderManage/OrderComplexQuery"
+ORDER_QUERY = f"{_PORTAL}/orderManage/OrderComplexQuery" if _PORTAL else ""
 COOKIE_NAME = "hk-sit"
 
 
@@ -104,9 +132,13 @@ def verify_cookie(cookie: str) -> tuple[bool, str]:
 
     if not cookie:
         return False, "cookie 为空"
-    cfg = sc.REGIONS.get("us") or sc.FIRST_CFG
+    # 必须走 region_cfg：接口主机是运行时从 OC_HOST_US 读的，原始 REGIONS 里没有 host
+    cfg = sc.region_cfg("us")
+    host = (cfg.get("host") or "").strip().rstrip("/")
+    if not host:
+        return False, "缺少 OC_HOST_US：请在 .env 里配置 US 接口主机"
     today = datetime.now(sc.TZ_CN).strftime("%Y/%m/%d")
-    url = cfg["host"] + sc.API_PREFIX + sc.API["list"]
+    url = host + sc.API_PREFIX + sc.API["list"]
     params = {"page": 1, "limit": 1,
               "startDate": f"{today} 00:00:00", "endDate": f"{today} 23:59:59"}
     if cfg.get("dest"):
@@ -153,6 +185,9 @@ def cookie_from_state() -> str:
 #   走一遍真实路径能顺带验证：门户能进、应用能开、US 区能查到单。
 #   任何一步失败只报警、不阻断（cookie 已经用接口验过了）。
 def enter_app(ctx, page, verbose: bool = True) -> tuple[bool, str]:
+    if not PORTAL_MAIN or not ORDER_QUERY:
+        return False, "缺少 OC_SSO_URL / OC_PORTAL，无法走应用页面"
+
     def say(msg: str) -> None:
         if verbose:
             print("  " + msg)
@@ -241,6 +276,9 @@ def enter_app(ctx, page, verbose: bool = True) -> tuple[bool, str]:
 # 浏览器登录
 # --------------------------------------------------------------------------
 def login_with_browser(user: str, pwd: str, wait_seconds: int = 300, enter: bool = True) -> str:
+    if not SSO_URL:
+        print("✗ 缺少 OC_SSO_URL：请在 .env 里配置登录入口地址（SSO 门户根地址）")
+        return ""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:

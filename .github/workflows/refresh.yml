@@ -6,6 +6,13 @@ name: refresh-dashboard
 # 需要配置的 Secrets（Settings → Secrets and variables → Actions）：
 #   OC_COOKIE          登录态，形如 hk-sit=xxxxxxxx-xxxx-...（约 4 天过期，失效后本 job 会失败提醒你）
 #   OC_SITE_PASSWORD   看板访问口令，浏览器解密 data.bin 用
+#   OC_HOST_US         【必填】US 区域接口主机根地址
+#   OC_PORTAL          【必填】后台门户地址（Referer / Origin）
+#   OC_SSO_URL         【必填】SSO 登录入口
+#   OC_HOST_UK / OC_HOST_AU   可选，只有 OC_REGION=all/uk/au 时才需要
+#   OC_DEPOP_TRACK     可选，Depop 对外轨迹页域名；不配则明细表不显示 ↗ 外链
+#
+# 这些地址刻意不写进仓库：公开仓库里看不到任何内部系统域名，只在 Secret 里。
 #
 # Pages 设置：Settings → Pages → Source 选「GitHub Actions」
 
@@ -51,9 +58,24 @@ jobs:
         env:
           OC_COOKIE: ${{ secrets.OC_COOKIE }}
           OC_SITE_PASSWORD: ${{ secrets.OC_SITE_PASSWORD }}
+          OC_HOST_US: ${{ secrets.OC_HOST_US }}
+          OC_HOST_UK: ${{ secrets.OC_HOST_UK }}
+          OC_HOST_AU: ${{ secrets.OC_HOST_AU }}
+          OC_PORTAL: ${{ secrets.OC_PORTAL }}
+          OC_SSO_URL: ${{ secrets.OC_SSO_URL }}
+          OC_DEPOP_TRACK: ${{ secrets.OC_DEPOP_TRACK }}
         run: |
-          if [ -z "$OC_COOKIE" ]; then echo "缺少 OC_COOKIE Secret"; exit 1; fi
-          if [ -z "$OC_SITE_PASSWORD" ]; then echo "缺少 OC_SITE_PASSWORD Secret"; exit 1; fi
+          missing=""
+          [ -z "$OC_COOKIE" ]        && missing="$missing OC_COOKIE"
+          [ -z "$OC_SITE_PASSWORD" ] && missing="$missing OC_SITE_PASSWORD"
+          [ -z "$OC_HOST_US" ]       && missing="$missing OC_HOST_US"
+          [ -z "$OC_PORTAL" ]        && missing="$missing OC_PORTAL"
+          [ -z "$OC_SSO_URL" ]       && missing="$missing OC_SSO_URL"
+          if [ -n "$missing" ]; then
+            echo "缺少 Secret:$missing"
+            echo "这些地址不进仓库，必须配在 Settings → Secrets and variables → Actions"
+            exit 1
+          fi
           cat > .env <<EOF
           OC_COOKIE=$OC_COOKIE
           OC_REGION=us
@@ -62,6 +84,12 @@ jobs:
           OC_KPI_START=2026/10/29
           OC_DETAIL_START=2026/10/19
           OC_SITE_PASSWORD=$OC_SITE_PASSWORD
+          OC_HOST_US=$OC_HOST_US
+          OC_HOST_UK=$OC_HOST_UK
+          OC_HOST_AU=$OC_HOST_AU
+          OC_PORTAL=$OC_PORTAL
+          OC_SSO_URL=$OC_SSO_URL
+          OC_DEPOP_TRACK=$OC_DEPOP_TRACK
           EOF
           mkdir -p data logs
           echo "配置已写入（cookie 长度 ${#OC_COOKIE}）"
@@ -76,6 +104,10 @@ jobs:
         run: python build_site.py --out site
 
       - name: 自检产物
+        env:
+          OC_HOST_US: ${{ secrets.OC_HOST_US }}
+          OC_PORTAL: ${{ secrets.OC_PORTAL }}
+          OC_SSO_URL: ${{ secrets.OC_SSO_URL }}
         run: |
           test -s site/index.html || { echo "index.html 缺失"; exit 1; }
           test -s site/data.bin    || { echo "data.bin 缺失"; exit 1; }
@@ -83,6 +115,13 @@ jobs:
           if grep -q '"ocOrderNo"' site/index.html; then
             echo "index.html 里残留了订单数据，拒绝发布"; exit 1
           fi
+          # 三保险：内部系统域名不能出现在公开页面里
+          for u in "$OC_HOST_US" "$OC_PORTAL" "$OC_SSO_URL"; do
+            h=$(printf '%s' "$u" | sed -E 's#^https?://##; s#/.*##')
+            if [ -n "$h" ] && grep -qF "$h" site/index.html; then
+              echo "产物里泄漏了内部域名 $h，拒绝发布"; exit 1
+            fi
+          done
           ls -lh site/
 
       - uses: actions/configure-pages@v5

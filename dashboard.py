@@ -1411,8 +1411,10 @@ const SRC_CODE = { USDOMS2D:'eBay', UDDOMS2D:'Depop' };
 const srcOf = o => o.source
   || SRC_CODE[String(o.product||'').toUpperCase()]
   || (o.product ? o.product : '—');
-/* Depop 有自己的对外轨迹页，单号直接拼在 number= 后面 */
-const DEPOP_TRACK = tn => 'https://depop.orangeconnex.us/en/tracking?number=' + encodeURIComponent(tn || '');
+/* Depop 有自己的对外轨迹页，单号直接拼在 number= 后面。
+   域名由 OC_DEPOP_TRACK 注入（仓库里不写死），没配就整条外链不渲染。 */
+const DEPOP_TRACK_BASE = __DEPOP_TRACK_BASE__;
+const DEPOP_TRACK = tn => DEPOP_TRACK_BASE ? DEPOP_TRACK_BASE + encodeURIComponent(tn || '') : '';
 const DATE_LABEL = {orderCreateTime:'建单日', dropTime:'投递日', deliveredTime:'妥投日'};
 
 document.getElementById('thead').innerHTML = COLS.map(c =>
@@ -1555,9 +1557,10 @@ function renderTable(){
         const lsFlag = ls
           ? `<span class="xflag lms" title="建单 OCUS001（LMS）${ls.createAt} → 投递 ${ls.dropCode}（LMS）${ls.dropAt}，间隔 ${ls.delayH}h">LMS 同供</span>`
           : '';
-        /* Depop 单：单号后挂 ↗，直达 depop.orangeconnex.us 官方轨迹页（不触发抽屉） */
-        const dpLink = (v && srcOf(o) === 'Depop')
-          ? `<a class="xlink" href="${DEPOP_TRACK(v)}" target="_blank" rel="noopener noreferrer"
+        /* Depop 单：单号后挂 ↗，直达 Depop 官方轨迹页（不触发抽屉） */
+        const dpHref = (v && srcOf(o) === 'Depop') ? DEPOP_TRACK(v) : '';
+        const dpLink = dpHref
+          ? `<a class="xlink" href="${dpHref}" target="_blank" rel="noopener noreferrer"
                 title="在 Depop 官方轨迹页查看 ${v}"
                 onclick="event.stopPropagation()">↗</a>`
           : '';
@@ -2094,7 +2097,9 @@ TRACE_JS = r"""
     if (!linkEl) return;
     if (o && typeof srcOf === 'function' && srcOf(o) === 'Depop') {
       const num = o.lastMileWaybill || o.ocOrderNo || tn;
-      linkEl.innerHTML = '<a class="depop-go" href="' + DEPOP_TRACK(num) + '"' +
+      const href = DEPOP_TRACK(num);
+      if (!href) { linkEl.innerHTML = ''; return; }
+      linkEl.innerHTML = '<a class="depop-go" href="' + href + '"' +
         ' target="_blank" rel="noopener noreferrer" title="打开 ' + num + ' 的 Depop 官方轨迹页">' +
         'Depop 官方轨迹 ↗<i>' + num + '</i></a>';
     } else {
@@ -2436,7 +2441,9 @@ STATIC_TRACE_JS = r"""
     if (!linkEl) return;
     if (o && typeof srcOf === 'function' && srcOf(o) === 'Depop') {
       const num = o.lastMileWaybill || o.ocOrderNo || tn;
-      linkEl.innerHTML = '<a class="depop-go" href="' + DEPOP_TRACK(num) + '"' +
+      const href = DEPOP_TRACK(num);
+      if (!href) { linkEl.innerHTML = ''; return; }
+      linkEl.innerHTML = '<a class="depop-go" href="' + href + '"' +
         ' target="_blank" rel="noopener noreferrer" title="打开 ' + num + ' 的 Depop 官方轨迹页">' +
         'Depop 官方轨迹 ↗<i>' + num + '</i></a>';
     } else {
@@ -2848,6 +2855,9 @@ def render(meta: dict, orders: list, dynamic: bool = False, readonly: bool = Fal
         raw_snap_json = json.dumps(raw_snap, ensure_ascii=False)
         raw_cut_json = json.dumps(raw_cut, ensure_ascii=False)
         raw_days_val = str(int(raw_days))
+    # Depop 官方轨迹页前缀：OC_DEPOP_TRACK 只配域名，路径与参数在代码里拼
+    _dt = _env("OC_DEPOP_TRACK").strip().rstrip("/")
+    depop_track_base = f"{_dt}/en/tracking?number=" if _dt else ""
     html = (TEMPLATE
             .replace("__META_JSON__", meta_json)
             .replace("__DATA_JSON__", data_json)
@@ -2856,6 +2866,8 @@ def render(meta: dict, orders: list, dynamic: bool = False, readonly: bool = Fal
             .replace("__LMSSAME_JSON__", lmssame_json)
             .replace("__KPI_START__", kpi_start)
             .replace("__DETAIL_START__", detail_start)
+            # Depop 官方轨迹页：域名从 OC_DEPOP_TRACK 注入（仓库源码里不写死）
+            .replace("__DEPOP_TRACK_BASE__", json.dumps(depop_track_base))
             # 抽屉样式与骨架两版共用：静态版也要「点单号看右侧轨迹」
             .replace("__EXTRA_CSS__", TRACE_CSS)
             .replace("__EXTRA_HTML__", TRACE_HTML)

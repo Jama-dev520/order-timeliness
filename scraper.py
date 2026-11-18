@@ -20,7 +20,7 @@ OrangeConnex / 递一物流 —— 美国（US）订单时效抓取
 
 接口（实测可用）
 ----------------
-  BASE   = https://spk-hub-us-api.orangeconnex.com      # 美国区数据在这里
+  BASE   = 环境变量 OC_HOST_US（各区域各一台主机，见下方 REGIONS / region_cfg）
   PREFIX = /aquarius-order
   GET {BASE}{PREFIX}/order/tracking-number/v1/tracking-number-list
       ?page=1&limit=100&startDate=2026/10/19 00:00:00&endDate=2026/11/03 23:59:59
@@ -87,17 +87,19 @@ _load_dotenv(BASE_DIR / ".env")
 # ---------------------------------------------------------------------------
 # 后台右上角三个 tab：UK | All | US。
 # 每个 tab 对应一台 API 主机（同一套接口、同一个 hk-sit cookie，但数据各自独立）。
+# 接口主机**刻意不写在这里**：从 OC_HOST_<区域> 读取（见 region_cfg），
+# 这样仓库里不含任何公司内部域名，公开镜像/PR 都不会泄露后台地址。
 REGIONS = {
-    "us": {"label": "US 美国", "host": "https://spk-hub-us-api.orangeconnex.com",
+    "us": {"label": "US 美国", "host": "",
            "rdc": "DFDLUS002", "spx": "SCAUS002", "dest": "US"},
-    "uk": {"label": "UK 英国", "host": "https://spk-hub-uk-api.orangeconnex.com",
+    "uk": {"label": "UK 英国", "host": "",
            "rdc": "DFDLUK002", "spx": "SCAUK002", "dest": ""},
-    "au": {"label": "AU 澳洲", "host": "https://spk-hub-sg-api.orangeconnex.com",
+    "au": {"label": "AU 澳洲", "host": "",
            "rdc": "DFDLAU002", "spx": "SCAAU002", "dest": ""},
 }
 
 REGION = (os.getenv("OC_REGION") or "us").lower()   # us / uk / au / all（all = UK + US）
-PORTAL = os.getenv("OC_PORTAL", "https://oc-uk.orangeconnex.com").rstrip("/")
+PORTAL = (os.getenv("OC_PORTAL") or "").strip().rstrip("/")
 API_PREFIX = os.getenv("OC_API_PREFIX", "/aquarius-order").rstrip("/")
 COOKIE = os.getenv("OC_COOKIE", "")
 DEST_OVERRIDE = (os.getenv("OC_DEST_COUNTRY") or "").strip()
@@ -129,9 +131,14 @@ def region_cfg(key: str) -> dict:
     cfg["code"] = key.upper()
     if DEST_OVERRIDE:
         cfg["dest"] = DEST_OVERRIDE
-    # OC_BASE_URL 只用于单区域调试，避免把两个 tab 打到同一台主机
+    # 接口主机从环境变量取：OC_HOST_<区域>（US/UK/AU）。
+    # OC_BASE_URL 只是单区域调试用的临时覆盖，避免把两个 tab 打到同一台主机。
+    host = ""
     if REGION != "all" and os.getenv("OC_BASE_URL"):
-        cfg["host"] = os.environ["OC_BASE_URL"].rstrip("/")
+        host = os.environ["OC_BASE_URL"]
+    else:
+        host = os.getenv(f"OC_HOST_{key.upper()}") or ""
+    cfg["host"] = host.strip().rstrip("/")
     cfg["rdc"] = os.getenv("OC_RDC_EVENT", cfg["rdc"])
     cfg["spx"] = os.getenv("OC_SPX_EVENT", cfg["spx"])
     return cfg
@@ -824,22 +831,38 @@ def _session():
     import requests
 
     s = requests.Session()
-    s.headers.update({
+    headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
-        "Referer": f"{PORTAL}/orderManage/OrderComplexQuery",
-        "Origin": PORTAL,
-    })
+    }
+    # Referer / Origin 跟着后台地址走；OC_PORTAL 没配就不带（空头反而可能被网关拒）
+    if PORTAL:
+        headers["Referer"] = f"{PORTAL}/orderManage/OrderComplexQuery"
+        headers["Origin"] = PORTAL
+    s.headers.update(headers)
     if COOKIE:
         s.headers["Cookie"] = COOKIE
     return s
 
 
+def _host_of(cfg: dict) -> str:
+    """取接口根地址；没配就明确报错，别拼出 '/aquarius-order/...' 这种相对 URL 去猜。"""
+    host = (cfg.get("host") or "").strip().rstrip("/")
+    if not host:
+        key = (cfg.get("key") or "us").upper()
+        raise SystemExit(
+            f"缺少接口主机：请在 .env 里设置 OC_HOST_{key}=区域接口根地址"
+            f"（例如 OC_HOST_{key}=https://<region>-api.<域名>），"
+            f"或临时用 OC_BASE_URL 覆盖"
+        )
+    return host
+
+
 def _url(path, cfg=None):
     cfg = cfg or FIRST_CFG
-    return cfg["host"] + API_PREFIX + path
+    return _host_of(cfg) + API_PREFIX + path
 
 
 def fetch_list(s, start, end, page=1, limit=100, cfg=None):
@@ -1153,7 +1176,8 @@ def build_meta(start: str, end: str, orders: list, demo: bool = False) -> dict:
         "generatedAt": datetime.now(TZ_CN).strftime("%Y-%m-%d %H:%M"),
         "demo": demo,
         "source": ("示例数据（未接真实后台）" if demo else
-                   " / ".join(f"{codes[k]['host']}{API_PREFIX}" for k in regions)),
+                   " / ".join(f"{(codes[k].get('host') or '(未配置主机)')}{API_PREFIX}"
+                              for k in regions)),
         "dateFrom": start, "dateTo": end,
         "anomalies": sum(1 for o in orders if o.get("anomaly")),
     }
