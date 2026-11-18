@@ -1,6 +1,6 @@
 # 订单时效看板（UK / All / US · PUDO / LMS RDC → SPX）
 
-抓 OrangeConnex（递一物流）订单，计算 **RDC 出库 → SPX 提取** 的耗时，输出自包含 HTML 看板。
+抓取订单管理后台的订单数据，计算 **RDC 出库 → SPX 提取** 的耗时，输出自包含 HTML 看板。
 看板右上角的 `UK | All | US` 三个 tab 直接对应后台 `Order Comprehensive Query` 右上角那个橙色开关。
 
 ## 区域 tab ↔ 数据源
@@ -25,7 +25,7 @@
 
 ```
 <SSO-HOST>/login                            # LDAP 账号 + 4 位验证码
-  → 门户 /main 点「SPK-UK智慧物流管理系统」
+  → 门户 /main 点「智慧物流管理系统」
   → <PORTAL-HOST>/orderManage/OrderComplexQuery
   → 右上角选 US → 点「搜 索」
 ```
@@ -944,7 +944,7 @@ python login_browser.py --enter     # 用已保存登录态走一遍真实页面
 **登录成功后会顺手走一遍真实路径**（这一步是核对，不是取数必需）：
 
 ```
-门户 /main → 点「SPK-UK智慧物流管理系统」 → 订单综合查询 → 切 US → 点「搜 索」
+门户 /main → 点「智慧物流管理系统」 → 订单综合查询 → 切 US → 点「搜 索」
 ```
 
 走通了会打印 `✓ US 区查询正常，当前页 20 行`，说明**人和机器看到的是同一份数据**；
