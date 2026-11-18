@@ -2837,7 +2837,9 @@ def render(meta: dict, orders: list, dynamic: bool = False, readonly: bool = Fal
         # 数据整体抽出去加密，HTML 里只留空壳，由解锁脚本回填
         global SECURE_PAYLOAD
         SECURE_PAYLOAD = {
-            "meta": meta, "orders": orders, "cross": cross, "dropoff": dropoff,
+            # 加密外发版也要脱敏：口令一旦被猜到/泄露，前端拿到的就是明文姓名 + 完整门牌。
+            # 姓名打码、剔除 consigneeAddr，保留城市/州/ZIP 足够做投递点位分析。
+            "meta": meta, "orders": mask_orders(orders), "cross": cross, "dropoff": dropoff,
             "lmsSame": lms_same, "raw": raw_map, "rawSnap": raw_snap,
             "rawCut": raw_cut, "rawDays": raw_days,
         }
