@@ -471,6 +471,8 @@ TEMPLATE = r"""<!DOCTYPE html>
       <label class="chk"><input type="checkbox" id="excludeTest" checked/> 排除测试单</label>
       <label class="chk" title="只看 OCUS001 建单与 DOUS002 投递的 vendorCode 都是 LM 的单">
         <input type="checkbox" id="onlyLms"/> 只看 LMS 同供<span id="lmsCnt" class="muted"></span></label>
+      <label class="chk" style="margin-left:12px" title="默认只看还在路上的单；已妥投的已经走完流程，不占表位。要复盘就勾上，或直接搜单号">
+        <input type="checkbox" id="showDone"/> 含已妥投<span id="doneCnt" class="muted"></span></label>
       <span class="count" id="count"></span>
     </div>
     <div class="tbl-scroll">
@@ -1401,7 +1403,7 @@ const COLS = [
   {key:'latestCode',     label:'最新节点',  cls:'mono'},
   {key:'status',         label:'状态',      type:'status'},
 ];
-let sortKey='orderCreateTime', sortAsc=false, query='', vendorFilter='', dropFilter='', statusFilter='', onlyLms=false;
+let sortKey='orderCreateTime', sortAsc=false, query='', vendorFilter='', dropFilter='', statusFilter='', onlyLms=false, showDone=false;
 let dateField='orderCreateTime', dateVal='';
 /* LMS 同供单：建单 OCUS001 与投递 DOUS002/DOUD002 的 vendorCode 都是 LM */
 const lmsOf = o => LMSSAME[o.lastMileWaybill] || LMSSAME[o.ocOrderNo] || null;
@@ -1444,6 +1446,14 @@ function renderTable(){
   if (dropFilter) rows = rows.filter(o => (o.dropVendor || '未投递') === dropFilter);
   if (statusFilter) rows = rows.filter(o => o.status === statusFilter);
   if (onlyLms) rows = rows.filter(o => lmsOf(o));
+
+  /* 已妥投的不占表位：这批单流程已经走完，盯的是还在路上的。
+     但只要你主动筛了任何条件（搜索/状态/日期/异常卡片/下拉），就自动恢复全量——
+     否则「明明有这单，搜都搜不到」比多 200 行更难受。 */
+  const hasFilter = !!(query || vendorFilter || dropFilter || statusFilter
+                       || onlyLms || dateVal || alertKey);
+  const doneTotal = ORDERS.filter(o => o.deliveredTime).length;
+  if (!showDone && !hasFilter) rows = rows.filter(o => !o.deliveredTime);
   /* 从上方异常卡片点进来：只留命中该规则的单，并限定在汇总窗口内，
      这样表里行数跟卡片上的数字严格一致（明细表本身能看到更早的单） */
   if (alertKey) {
@@ -1578,12 +1588,15 @@ function renderTable(){
   document.getElementById('count').textContent =
     `显示 ${rows.length} / ${ORDERS.length} 单（明细自 ${mmdd(DETAIL_START)} 起`
     + (dateVal ? `，${DATE_LABEL[dateField] || ''} = ${mmdd(dateVal)}` : '')
+    + ((!showDone && !hasFilter && doneTotal) ? `，已妥投 ${doneTotal} 单未显示` : '')
     + '）';
   const dClear = document.getElementById('dateClear');
   if (dClear) dClear.style.display = dateVal ? '' : 'none';
   /* 勾选项旁边的命中数：跟随「排除测试单」与区域，不随搜索/筛选变化 */
   const lmsCnt = document.getElementById('lmsCnt');
   if (lmsCnt) lmsCnt.textContent = `（${ORDERS.filter(o => lmsOf(o)).length}）`;
+  const doneCnt = document.getElementById('doneCnt');
+  if (doneCnt) doneCnt.textContent = `（${doneTotal}）`;
 }
 
 /* 下拉选项 */
@@ -1653,6 +1666,10 @@ document.getElementById('excludeTest').addEventListener('change', e=>{
 });
 document.getElementById('onlyLms').addEventListener('change', e=>{
   onlyLms = e.target.checked;
+  renderTable();
+});
+document.getElementById('showDone').addEventListener('change', e=>{
+  showDone = e.target.checked;
   renderTable();
 });
 
@@ -1793,7 +1810,7 @@ function renderAlerts(){
 /* 点预警卡片时把工具栏上的筛选全部归零，保证「卡片数字 = 表里行数」 */
 function clearTableFilters(){
   query = ''; vendorFilter = ''; dropFilter = ''; statusFilter = '';
-  onlyLms = false; dateVal = '';
+  onlyLms = false; dateVal = ''; showDone = false;
   const $ = id => document.getElementById(id);
   if ($('search')) $('search').value = '';
   if ($('vendorFilter')) $('vendorFilter').value = '';
@@ -1801,6 +1818,7 @@ function clearTableFilters(){
   if ($('statusFilter')) $('statusFilter').value = '';
   if ($('dateVal')) $('dateVal').value = '';
   if ($('onlyLms')) $('onlyLms').checked = false;
+  if ($('showDone')) $('showDone').checked = false;
   if ($('dateClear')) $('dateClear').style.display = 'none';
 }
 
