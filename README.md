@@ -609,8 +609,11 @@ python build_site.py --out dist         # 换输出目录
 
 几点要知道：
 
-- **cookie 约 4 天失效**。失效后 job 会在「先探一次接口」这步失败并给你发邮件，
-  这时在本机 `python login_browser.py --refresh` 续期，把新的 `OC_COOKIE` 贴回 Secret 即可。
+- **cookie 约 4~5 天失效**。失效后 job 会在「先探一次接口」这步失败并给你发邮件，
+  这时在本机跑 `python renew_token.py` 一条命令即可：先验当前 cookie（有效就跳过登录），
+  失效才弹 Chrome（人只输 4 位验证码），然后自动写回 `.env`、推 GitHub Secret、
+  触发部署、解密线上 `data.bin` 核对单量与生成时间。
+  `--check` 只看状态、`--no-run` 只同步不部署、`--force` 强制重登。
   纯静态托管没法在前端续 cookie——续期最后一步是人工输 4 位验证码，只能在你本机做。
 - 工作流不往仓库里提交数据，只上传 Pages artifact，所以仓库不会随时间膨胀。
 - 免费额度：私有仓库 2000 分钟/月，每次完整刷新约 15 分钟 × 12 次/天 ≈ 超额度；
