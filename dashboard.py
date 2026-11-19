@@ -2294,9 +2294,263 @@ def _static_links() -> list[dict]:
     return out
 
 
+# 统一刷新内核：三个入口（线上口令版 / 本地 file:// / 书签实时版）点「刷新数据」
+# 走的是**同一段代码、同一套优先级**，只有最后落到哪条路上不同。
+#
+#   ① 书签实时版（window.__OC_LIVE）—— 数据在你的浏览器内存里，唯一的「新数据」
+#      来源是回内部系统页面重点一次书签；这里只解释，不假装在抓。
+#   ② 本机服务（127.0.0.1:8000 有 serve.py）—— POST /api/refresh-all，
+#      跑完 refresh_all.py 会重写 dashboard.html，reload 即可。
+#   ③ 云端定时（GitHub Actions 每 2 小时）—— 只「检查有没有新数据包」，
+#      有就重新加载（口令在 sessionStorage 里，自动解锁）。
+#
+# 三处的按钮文案、进度文字、失败提示因此完全一致，不用再记「哪个页面该按哪个键」。
+REFRESH_CORE_JS = r"""
+<script>
+window.OCRefresh = (function(){
+  var QS  = new URLSearchParams(location.search);
+  var API = (QS.get('api') || 'http://127.0.0.1:8000').replace(/\/+$/, '');
+  var POLL = 2000, PROBE_MS = 1500;
+
+  var esc = function(s){
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+    });
+  };
+
+  /* ---------------- 弹窗（统一外观，替代 alert） ---------------- */
+  var mask = null;
+  function close(){ if (mask && mask.parentNode) mask.parentNode.removeChild(mask); mask = null; }
+
+  function modal(title, bodyHtml, actions){
+    close();
+    mask = document.createElement('div');
+    mask.id = '__ocf_mask';
+    mask.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(26,26,24,.34);' +
+      'display:flex;align-items:center;justify-content:center';
+    mask.onclick = function(e){ if (e.target === mask) close(); };
+
+    var card = document.createElement('div');
+    card.style.cssText = 'width:430px;max-width:calc(100vw - 40px);padding:22px 24px;background:#fff;' +
+      'border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.18);' +
+      'font:13px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;' +
+      'color:#2c2c2a';
+    card.innerHTML = '<div class="__t" style="font-size:14px;font-weight:600;margin-bottom:8px"></div>' +
+      '<div class="__b" style="color:#55554f;font-size:12.5px"></div>' +
+      '<div class="__a" style="margin-top:18px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap"></div>';
+    card.querySelector('.__t').textContent = title;
+    card.querySelector('.__b').innerHTML = bodyHtml || '';
+
+    var act = card.querySelector('.__a');
+    (actions || []).forEach(function(a){
+      var el = document.createElement(a.href ? 'a' : 'button');
+      if (a.href){ el.href = a.href; el.target = '_blank'; el.rel = 'noopener'; }
+      el.textContent = a.text;
+      el.style.cssText = 'padding:6px 14px;border-radius:8px;font-size:12.5px;cursor:pointer;' +
+        'text-decoration:none;line-height:1.6;' +
+        (a.primary
+          ? 'background:#378add;border:1px solid #378add;color:#fff'
+          : 'background:#fff;border:1px solid #d5d9e0;color:#3d4450');
+      el.onclick = function(){ if (a.onclick) a.onclick(); else close(); };
+      act.appendChild(el);
+    });
+
+    mask.appendChild(card);
+    document.body.appendChild(mask);
+  }
+
+  /* ---------------- 探测本机服务 ---------------- */
+  function probeLocal(){
+    if (!API) return Promise.resolve(null);
+    return new Promise(function(done){
+      var ctl = window.AbortController ? new AbortController() : null;
+      var fin = false;
+      var t = setTimeout(function(){
+        if (fin) return; fin = true;
+        if (ctl) { try { ctl.abort(); } catch (e) {} }
+        done(null);
+      }, PROBE_MS);
+      var opt = { cache: 'no-store' };
+      if (ctl) opt.signal = ctl.signal;
+      fetch(API + '/healthz', opt).then(function(r){
+        return r.json().catch(function(){ return {}; }).then(function(j){
+          if (fin) return; fin = true; clearTimeout(t);
+          done({ status: r.status, body: j || {} });
+        });
+      }).catch(function(){
+        if (fin) return; fin = true; clearTimeout(t); done(null);
+      });
+    });
+  }
+
+  /* ---------------- ② 本机抓数 ---------------- */
+  function localFlow(setBusy){
+    setBusy(true, '启动抓取…');
+    fetch(API + '/api/refresh-all', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+    }).then(function(r){
+      return r.json().catch(function(){ return {}; }).then(function(j){
+        return { status: r.status, body: j || {} };
+      });
+    }).then(function(res){
+      if (res.status === 403){
+        setBusy(false);
+        modal('本机服务在跑，但不允许这个页面触发',
+          '服务只接受<b>本机打开的页面</b>点刷新（防止别处网页偷偷调用）。<br>' +
+          '请用本机的 <code>dashboard.html</code> 或 <code>http://127.0.0.1:8000</code> 打开再点。');
+        return;
+      }
+      // 409 = 已经有一个刷新任务在跑（另一个标签页点的，或上一次还没结束），
+      // 这种情况不该报错，直接跟着看同一个进度就行
+      var already = res.status === 409 && (res.body.error || '').indexOf('已有刷新') >= 0;
+      if (!already && !res.body.ok){
+        setBusy(false);
+        modal('启动刷新失败', esc(res.body.error || '服务返回异常') );
+        return;
+      }
+      var t0 = Date.now(), timer = null;
+      function tick(){
+        setBusy(true, '抓取中 ' + Math.round((Date.now() - t0) / 1000) + 's…');
+        fetch(API + '/api/refresh-status', {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+        }).then(function(r){ return r.json(); }).then(function(st){
+          if (st.running){
+            if (st.elapsed) setBusy(true, '抓取中 ' + Math.round(st.elapsed) + 's…');
+            return;
+          }
+          if (timer) { clearInterval(timer); timer = null; }
+          if (st.ok){
+            setBusy(true, '完成，正在重载…');
+            setTimeout(function(){ location.reload(); }, 500);
+          } else {
+            setBusy(false);
+            modal('抓取失败', esc(st.error || '未知错误') +
+              '<div style="margin-top:8px;color:#9a9a94">Cookie 过期的话，跑一次 <code>python renew_token.py</code>。</div>');
+          }
+        }).catch(function(){});
+      }
+      timer = setInterval(tick, POLL);
+      // 页面切后台时定时器会被节流到 30~60 秒一次；切回来立刻补查
+      document.addEventListener('visibilitychange', function(){
+        if (!document.hidden && timer) tick();
+      });
+    }).catch(function(){
+      setBusy(false);
+      modal('连不上本机服务 ' + API,
+        '探测时还在，发请求时断了。可能服务刚退出，或浏览器拦了本地地址。<br>' +
+        '双击项目目录的「启动看板.bat」可以重新拉起服务。');
+    });
+  }
+
+  /* ---------------- ③ 云端定时：查有没有新数据包 ---------------- */
+  function binSig(){
+    return fetch('data.bin', {method: 'HEAD', cache: 'no-store'}).then(function(r){
+      if (!r.ok) return null;
+      // 与 build_site.py 解锁脚本里的取值顺序必须一致，否则会天天误判「有新数据」
+      return r.headers.get('etag') || r.headers.get('last-modified')
+             || r.headers.get('content-length') || '';
+    }).catch(function(){ return null; });
+  }
+
+  // cron 是 `23 */2 * * *`（UTC 每两小时的第 23 分）。东八区对齐后仍是偶数小时的 23 分。
+  function nextRun(){
+    var now = new Date(), c = new Date(now.getTime());
+    c.setMinutes(23, 0, 0);
+    if (c <= now) c.setHours(c.getHours() + 1);
+    while (c.getHours() % 2 !== 0) c.setHours(c.getHours() + 1);
+    return c;
+  }
+  function hhmm(d){
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
+  function cloudFlow(setBusy){
+    var gen = (window.META && META.generatedAt) ? String(META.generatedAt) : '未知';
+    var nr = nextRun();
+    var acts = [];
+
+    acts.push({ text: '检查有没有新数据', primary: true, onclick: function(){
+      close();
+      setBusy(true, '检查云端数据…');
+      binSig().then(function(sig){
+        setBusy(false);
+        if (!sig){ location.reload(); return; }
+        if (!window.__OC_BIN_SIG || sig !== window.__OC_BIN_SIG){
+          modal('云端已经有新数据', '正在重新加载（口令会自动带上，不用再输）。',
+                [{ text: '好', primary: true, onclick: function(){ location.reload(); } }]);
+          setTimeout(function(){ location.reload(); }, 900);
+          return;
+        }
+        modal('云端还没有新数据',
+          '当前数据：<b>' + esc(gen) + '</b><br>' +
+          '云端每 2 小时自动抓一次，下一次约 <b>' + hhmm(nr) + '</b>。<br>' +
+          '<span style="color:#9a9a94">想立刻拿到最新数据，用下面这条：</span>',
+          [{ text: '用我的登录态立即取数', href: 'install.html' },
+           { text: '知道了', primary: true }]);
+      });
+    }});
+
+    acts.push({ text: '用我的登录态取数', href: 'install.html' });
+    acts.push({ text: '关闭' });
+
+    modal('数据来源是云端定时任务',
+      '当前数据：<b>' + esc(gen) + '</b><br>' +
+      '云端每 2 小时自动抓一次，下一次约 <b>' + hhmm(nr) + '</b>。' +
+      '<div style="margin-top:10px;padding:9px 11px;background:#f7f7f5;border-radius:8px;font-size:12px">' +
+      '想<b>立刻</b>取到最新数据：在内部系统页面点一下书签，用你自己的登录态抓，' +
+      '再打开自动弹窗的看板。<a href="install.html" style="color:#378add;text-decoration:none">装书签 →</a>' +
+      '</div>' +
+      '<div style="margin-top:10px;color:#9a9a94;font-size:11.5px">' +
+      '这台机器上如果跑着 <code>serve.py</code>，刷新会直接走本地抓数；现在没探测到。</div>',
+      acts);
+  }
+
+  /* ---------------- ③-b 本地文件 + 本机没服务 ---------------- */
+  // file:// 打开的 dashboard.html 不会自己更新，唯一的取数途径就是本机 serve.py，
+  // 所以这里不能讲「云端每 2 小时自动抓」，得直接说怎么把服务拉起来。
+  function localMissingFlow(setBusy){
+    setBusy(false);
+    modal('本机服务没在跑',
+      '刷新要靠本机 <code>serve.py</code> 抓数，现在连不上 <code>' + esc(API) + '</code>。' +
+      '<div style="margin-top:12px;padding:10px 12px;background:#f7f7f5;border-radius:8px">' +
+      '<b>最简单的做法</b><br>双击项目目录里的 <code>启动看板.bat</code>，' +
+      '它会起一个最小化的服务窗口，再重新打开本页。</div>' +
+      '<div style="margin-top:10px;color:#9a9a94;font-size:11.5px">' +
+      '手动也可以：<code>python serve.py --host 127.0.0.1 --port 8000 --no-fetch</code><br>' +
+      '服务换过端口：<code>dashboard.html?api=http://127.0.0.1:端口</code></div>');
+  }
+
+  /* ---------------- ① 书签实时版 ---------------- */
+  function liveFlow(setBusy){
+    setBusy(false);
+    modal('这个窗口的数据来自书签',
+      '数据是用<b>你自己</b>在内部系统的登录态抓的，只存在这个浏览器窗口里，' +
+      '所以「刷新」必须回到内部系统页面重新点一次书签。<div style="margin-top:10px;color:#9a9a94">' +
+      '抓完会自动弹出一个新的看板窗口，用那个就行。</div>',
+      [{ text: '知道了', primary: true }]);
+  }
+
+  /* ---------------- 入口 ---------------- */
+  function run(setBusy){
+    setBusy(true, '检查数据源…');
+    if (window.__OC_LIVE){ liveFlow(setBusy); return; }
+    probeLocal().then(function(p){
+      if (p) { localFlow(setBusy); return; }
+      if (location.protocol === 'file:'){ localMissingFlow(setBusy); return; }
+      setBusy(false);
+      cloudFlow(setBusy);
+    });
+  }
+
+  return { run: run, modal: modal, close: close };
+})();
+</script>
+"""
+
+
 # 静态版专用：标题右侧一排按钮
-#   ①「刷新数据」—— 调本机 serve.py 的 /api/refresh-all，跑完 refresh_all.py 会重写本文件，
-#      然后 reload 就能看到新数（file:// 没有后端，只能借这条路）
+#   ①「刷新数据」—— 逻辑全在 REFRESH_CORE_JS 里（三处入口共用），这里只负责摆位置、
+#      管按钮忙碌态。本机有 serve.py 就本地抓，托管站就查云端有没有新数据包。
 #      **不用输口令**：服务端只认「回环 IP + 无反代头 + 本机 Origin」，本机点一下就开始抓；
 #      隧道/内网进来的人没有这个组合，会被 403 挡掉
 #   ② 两张异常清单 —— 直接指向已生成好的 data/*.html
@@ -2305,10 +2559,6 @@ STATIC_LINKS_JS = r"""
 (function(){
   const genLine = document.getElementById('genline');
   if (!genLine) return;
-
-  const QS = new URLSearchParams(location.search);
-  // 服务和静态文件不在同一台/同一端口时，可这样覆盖：dashboard.html?api=http://127.0.0.1:9000
-  const API = (QS.get('api') || 'http://127.0.0.1:8000').replace(/\/+$/, '');
 
   const wrap = document.createElement('span');
   wrap.style.cssText = 'display:block;text-align:right;margin:0 0 4px';
@@ -2327,79 +2577,24 @@ STATIC_LINKS_JS = r"""
 
   /* ---------- 刷新按钮 ---------- */
   const btn = document.createElement('button');
+  btn.id = 'btnRefresh';           // live.js 会按这个 id 改 title（文案保持统一）
   btn.textContent = '刷新数据';
-  btn.title = '调本机服务的 /api/refresh-all：抓数 → 重算三张清单 → 重写本文件，完成后自动重载';
+  btn.title = '取最新数据：本机有 serve.py 就本地抓数，托管站就查云端有没有新数据包';
   btn.style.cssText = 'margin-left:0;padding:3px 14px;border-radius:12px;font-size:12px;' +
     'line-height:18px;font-family:inherit;cursor:pointer;color:#fff;background:#e8722c;' +
     'border:1px solid #e8722c';
   wrap.appendChild(btn);
 
-  let timer = null;
+  // 三处入口共用同一套逻辑，见 REFRESH_CORE_JS；这里只管按钮的忙碌态
   function setBusy(on, txt){
     btn.disabled = !!on;
     btn.style.cursor = on ? 'default' : 'pointer';
     btn.style.opacity = on ? '0.75' : '1';
-    btn.textContent = txt || (on ? '抓取中…' : '刷新数据');
+    btn.textContent = txt || (on ? '取数中…' : '刷新数据');
   }
-  function fail(msg){
-    if (timer) { clearInterval(timer); timer = null; }
-    setBusy(false);
-    alert(msg);
-  }
-
-  btn.onclick = async function(){
-    setBusy(true, '连接服务…');
-    let resp, data;
-    try {
-      resp = await fetch(API + '/api/refresh-all', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: '{}'
-      });
-      data = await resp.json();
-    } catch (e) {
-      fail('连不上本机服务 ' + API + '\n\n' +
-           '刷新要靠本机 serve.py 抓数，它现在没在跑。\n\n' +
-           '最简单的做法：双击项目目录里的「启动看板.bat」——\n' +
-           '它会起一个最小化的服务窗口，再打开本页。\n\n' +
-           '也可以手动运行：\n' +
-           'python serve.py --host 127.0.0.1 --port 8000 --no-fetch\n\n' +
-           '（服务换过端口的话，用 dashboard.html?api=http://127.0.0.1:端口 打开）');
-      return;
-    }
-    if (resp.status === 403) {
-      fail(data.error || '刷新只能在运行服务的这台机器上触发');
-      return;
-    }
-    if (!data.ok) { fail(data.error || '启动刷新失败'); return; }
-
-    const t0 = Date.now();
-    const tick = async function(){
-      btn.textContent = '抓取中 ' + Math.round((Date.now() - t0) / 1000) + 's…';
-      let st;
-      try {
-        const rr = await fetch(API + '/api/refresh-status', {
-          method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
-        });
-        st = await rr.json();
-      } catch (e) { return; }
-      if (st.running) {
-        if (st.elapsed) btn.textContent = '抓取中 ' + Math.round(st.elapsed) + 's…';
-        return;
-      }
-      if (timer) { clearInterval(timer); timer = null; }
-      if (st.ok) {
-        btn.textContent = '完成，正在重载…';
-        setTimeout(function(){ location.reload(); }, 500);
-      } else {
-        fail('抓取失败：' + (st.error || '未知错误'));
-      }
-    };
-    timer = setInterval(tick, 2000);
-    // 页面切到后台时 Chrome 会把定时器节流到 30~60 秒一次；切回来立刻补查一次
-    document.addEventListener('visibilitychange', function(){
-      if (!document.hidden && timer) tick();
-    });
+  btn.onclick = function(){
+    if (!window.OCRefresh){ alert('页面是旧版本，请刷新一次本页'); return; }
+    window.OCRefresh.run(setBusy);
   };
 
   /* ---------- 本地清单链接 ---------- */
@@ -2826,7 +3021,8 @@ def render(meta: dict, orders: list, dynamic: bool = False, readonly: bool = Fal
         if not secure:
             # 加密部署版没有"本机路径"这个概念，别把 C:\ 路径写进外发页面
             meta["localLinks"] = _static_links()
-        extra_js = STATIC_LINKS_JS + STATIC_TRACE_JS + RAW_BLOCK_JS
+        # REFRESH_CORE_JS 必须在 STATIC_LINKS_JS 之前：后者一执行就会绑定按钮
+        extra_js = REFRESH_CORE_JS + STATIC_LINKS_JS + STATIC_TRACE_JS + RAW_BLOCK_JS
         if secure:
             # 加密部署版跑在静态托管上，没有本机 serve.py：默认不发 /api/track 请求，
             # 直接吃内嵌的原始事件（仍可用 ?api=https://... 指向一个真实后端）

@@ -110,6 +110,9 @@ UNLOCK_JS = r"""
   async function fetchData(pw){
     var res = await fetch('data.bin', {cache: 'no-store'});
     if (!res.ok) throw new Error('数据文件加载失败（' + res.status + '）');
+    // 记下这个数据包的身份，供「刷新数据 → 检查有没有新数据」比对（HTTP 头，无业务含义）
+    window.__OC_BIN_SIG = res.headers.get('etag') || res.headers.get('last-modified')
+                          || res.headers.get('content-length') || '';
     var buf = await res.arrayBuffer();
     var magic = new TextDecoder().decode(new Uint8Array(buf, 0, 5));
     if (magic !== 'OCDB1') throw new Error('数据文件格式不对');

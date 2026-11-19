@@ -564,6 +564,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        # Chrome 的 Private Network Access：https 页面（线上托管版）想访问
+        # http://127.0.0.1 会先带 Access-Control-Request-Private-Network 预检。
+        # 放行只影响「能不能探测到本机服务」；真正的刷新动作仍被 _is_local() 的
+        # Origin 校验挡着（github.io 的 Origin 不是本机 → 403），不会变成公网后门。
+        self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Access-Control-Max-Age", "600")
         self.send_header("Content-Length", "0")
         self.end_headers()
