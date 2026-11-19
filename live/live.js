@@ -61,7 +61,43 @@
     titleEl.style.color = '#c0392b';
   }
 
-  /* ---------------- 1. 向 opener 打招呼，等数据 ---------------- */
+  /* ---------------- 1. 判断是不是书签开出来的窗口 ---------------- */
+  // 数据只能由「内部页面里点书签」那一方 postMessage 递进来（对方是 opener）。
+  // 直接打开 / 新标签粘贴链接 → 永远收不到，必须立刻说清楚，不能干等 20 秒。
+  var HAS_OPENER = false;
+  try { HAS_OPENER = !!(window.opener && !window.opener.closed); } catch (e) { HAS_OPENER = false; }
+
+  if (!HAS_OPENER) {
+    guideNoOpener();
+    return;
+  }
+
+  function guideNoOpener() {
+    ui('数据靠内部系统的登录态抓取', '', 0);
+    // 主标题直接说清楚问题，避免被当成「正在加载」的正常页面
+    var h = box.querySelector('h1');
+    if (h) h.textContent = '这个窗口没有数据来源';
+    var card = box.firstElementChild;
+    if (card) card.style.width = '430px';
+    subEl.innerHTML = [
+      '<div style="text-align:left;margin:2px 0 0">',
+      '数据是用<b>你自己</b>在内部系统的登录态抓的，所以这个页面单独打开时没有数据可显示。',
+      '</div>',
+      '<div style="text-align:left;margin:12px 0 0;padding:10px 12px;background:#f7f7f5;border-radius:8px">',
+      '<b>正确用法</b><br>',
+      '1. 在内部系统进到「订单综合查询」<br>',
+      '2. 点一下书签栏里的「取当期订单」<br>',
+      '3. 抓完会<b>自动弹出</b>看板窗口，用那个窗口',
+      '</div>',
+      '<div style="margin-top:14px"><a href="install.html" ',
+      'style="color:#378add;text-decoration:none">还没装书签？打开安装页 →</a></div>',
+      '<div style="margin-top:10px;color:#9a9a94">',
+      '刚点过书签的话，请关掉本窗口，用书签弹出的那一个（手动打开收不到数据）</div>'
+    ].join('');
+    if (barEl && barEl.parentNode) barEl.parentNode.style.display = 'none';
+  }
+
+  /* ---------------- 2. 向 opener 打招呼，等数据 ---------------- */
   var got = false;
   var ping = setInterval(function () {
     if (got || !window.opener) return;
@@ -83,8 +119,9 @@
   setTimeout(function () {
     if (!got) {
       ui('还没收到数据',
-         '如果你没看到内部系统页面的「本地取数」面板，请回到那个页面重新点一次书签。' +
-         '<br>这个窗口可以关掉。', 0);
+         '书签那边可能还在抓（17 天窗口约 3 分钟），也可能已经中断。' +
+         '<br>请回内部系统页面看「本地取数」面板的进度；要重来就重新点一次书签。' +
+         '<br>本窗口可以关掉。', 0);
     }
   }, 20000);
 

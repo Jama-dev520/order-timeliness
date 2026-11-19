@@ -91,7 +91,7 @@ def main() -> None:
             "([api]) => document.documentElement.setAttribute('data-oc-api', api)", [api])
         if args.via_url:
             # 与真实书签一致：从站点加载 agent.js，由它自己从 src 推导看板地址
-            url = args.dash.rstrip("/") + f"/live/agent.js?v=3&days={args.days}"
+            url = args.dash.rstrip("/") + f"/live/agent.js?v=4&days={args.days}"
             print(f"    via url: {url}")
             page.add_script_tag(url=url)
         else:

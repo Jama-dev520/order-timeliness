@@ -246,7 +246,7 @@ INSTALL_HTML = r"""<!doctype html>
     var api = (inp.value || '').trim().replace(/\/+$/, '');
     var code = "(function(){var d=document,s=d.createElement('script');"
       + (api ? "d.documentElement.setAttribute('data-oc-api','" + api + "');" : "")
-      + "s.src='" + BASE + "live/agent.js?v=3&days=" + days + "';"
+      + "s.src='" + BASE + "live/agent.js?v=4&days=" + days + "';"
       + "d.head.appendChild(s);})();";
     a.href = 'javascript:' + code;
     if (!api) {
@@ -293,7 +293,7 @@ def build(out_dir: Path, password: str) -> tuple[Path, Path]:
     # 顺序有讲究：先放锁屏 DOM，再挂 live.js（它会摘掉锁屏），最后才是解密引导
     html = html.replace("</body>",
                         LOCK_HTML
-                        + '<script src="live/live.js?v=3"></script>\n'
+                        + '<script src="live/live.js?v=4"></script>\n'
                         + UNLOCK_JS + "</body>", 1)
 
     out_dir.mkdir(parents=True, exist_ok=True)
