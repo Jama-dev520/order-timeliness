@@ -193,6 +193,20 @@
     box = null;
     window.__start();
 
+    // 这个模式的「最新数据」只能靠重新点书签，原按钮调的是本机 serve.py，点了会失败
+    var rb = document.getElementById('btnRefresh');
+    if (rb) {
+      var nb = rb.cloneNode(true);           // clone 掉原有监听
+      nb.textContent = '重新取数';
+      nb.title = '回到内部系统页面，重新点一次「取当期订单」书签';
+      nb.style.opacity = '1';
+      nb.addEventListener('click', function () {
+        alert('本地实时模式的数据来自书签抓取。\n\n请回到内部系统（订单综合查询）页面，'
+            + '重新点一次书签栏里的「取当期订单」，抓完会自动开一个新的看板窗口。');
+      });
+      rb.parentNode.replaceChild(nb, rb);
+    }
+
     var lv = d.live || {};
     if (lv.start) {
       var t = document.createElement('div');
