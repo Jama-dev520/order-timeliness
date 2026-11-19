@@ -2359,8 +2359,11 @@ STATIC_LINKS_JS = r"""
       data = await resp.json();
     } catch (e) {
       fail('连不上本机服务 ' + API + '\n\n' +
-           '这个按钮要靠本机 serve.py 去抓数，先在项目目录运行：\n' +
-           'python serve.py --host 0.0.0.0 --port 8000 --no-fetch --token 你的口令\n\n' +
+           '刷新要靠本机 serve.py 抓数，它现在没在跑。\n\n' +
+           '最简单的做法：双击项目目录里的「启动看板.bat」——\n' +
+           '它会起一个最小化的服务窗口，再打开本页。\n\n' +
+           '也可以手动运行：\n' +
+           'python serve.py --host 127.0.0.1 --port 8000 --no-fetch\n\n' +
            '（服务换过端口的话，用 dashboard.html?api=http://127.0.0.1:端口 打开）');
       return;
     }
