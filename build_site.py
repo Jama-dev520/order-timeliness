@@ -33,6 +33,11 @@ DATA_FILE = BASE_DIR / "data" / "orders.json"
 MAGIC = b"OCDB1"
 ITERATIONS = 200_000
 
+# 本地实时模式要一起发布的静态资源：代理脚本 + 计算链源码（原样发布，浏览器里用 Pyodide 跑）
+LIVE_SRC = BASE_DIR / "live"
+LIVE_DEPS = ["scraper.py", "cross_vendor.py", "dropoff_cancel.py",
+             "lms_same_vendor.py", "dashboard.py"]
+
 
 def _env(key: str, default: str = "") -> str:
     """读 .env（不依赖 python-dotenv，与其它脚本保持一致）。"""
@@ -93,6 +98,8 @@ LOCK_HTML = """
 UNLOCK_JS = r"""
 <script>
 (function(){
+  // 本地实时模式：数据由书签在内部系统页面抓取后 postMessage 过来，不走口令解密
+  if (location.search.indexOf('live=1') >= 0) return;
   var SS_KEY = 'oc_site_pw';
   var msg = document.getElementById('lockMsg');
   var btn = document.getElementById('lockBtn');
@@ -174,6 +181,91 @@ UNLOCK_JS = r"""
 """
 
 
+INSTALL_HTML = r"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="robots" content="noindex">
+<title>安装本地取数书签 · 订单时效看板</title>
+<style>
+  body{margin:0;padding:44px 20px;background:#f6f6f4;color:#2c2c2a;
+    font:14px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+  .card{max-width:640px;margin:0 auto;background:#fff;border-radius:14px;padding:30px 34px;
+    box-shadow:0 1px 2px rgba(0,0,0,.06),0 8px 28px rgba(0,0,0,.06)}
+  h1{margin:0 0 4px;font-size:18px;font-weight:600}
+  .sub{color:#888780;font-size:12px;margin-bottom:22px}
+  h2{font-size:13px;font-weight:600;margin:22px 0 8px;color:#2c2c2a}
+  p{margin:0 0 10px;color:#55554f;font-size:13px}
+  ol{margin:0;padding-left:20px;color:#55554f;font-size:13px}
+  li{margin-bottom:6px}
+  .drag{display:inline-block;margin:6px 0 2px;padding:9px 18px;border-radius:8px;
+    background:#378add;color:#fff;text-decoration:none;font-size:13px;cursor:grab}
+  .warn{background:#fff8e6;border:1px solid #f2e2b8;border-radius:8px;padding:10px 12px;
+    font-size:12px;color:#8a6d1f;margin-top:18px;line-height:1.7}
+  code{background:#f1f0ec;padding:1px 5px;border-radius:4px;font-size:12px}
+  input{width:100%;box-sizing:border-box;margin:6px 0 4px;padding:8px 10px;border-radius:8px;
+    border:1px solid #dcdbd5;font:13px/1.5 ui-monospace,Consolas,monospace;color:#2c2c2a}
+  input:focus{outline:none;border-color:#378add}
+</style></head><body>
+<div class="card">
+  <h1>安装本地取数书签</h1>
+  <div class="sub">装一次，之后在内部系统页面点一下就能看到当期数据</div>
+
+  <h2>为什么是这样</h2>
+  <p>看板的数据用你自己在内部系统的登录态抓取，全程在你的浏览器内存里完成，
+     不上传、不落盘、不需要任何人维护 token。</p>
+
+  <h2>第 1 步：填接口地址</h2>
+  <p>内部系统后台的接口域名（在订单查询页按 <code>F12</code> → Network 里能看到以
+     <code>…-api.</code> 开头的请求）。这个地址只会写进你本地书签，不会上传。</p>
+  <input id="apiIn" placeholder="https://xxx-api.example.com" autocomplete="off" spellcheck="false">
+
+  <h2>第 2 步：把按钮拖到书签栏</h2>
+  <ol>
+    <li>确认浏览器书签栏已显示（<code>Ctrl+Shift+B</code>）。</li>
+    <li>把下面这个按钮<b>拖到书签栏</b>：<br>
+        <a id="bm" class="drag" href="#" onclick="return false">取当期订单</a></li>
+  </ol>
+
+  <h2>第 3 步：在内部系统里点它</h2>
+  <p>先登录内部系统，进到<b>订单综合查询</b>页面（地址栏是 <code>oc-</code> 开头那个系统），
+     再点书签栏里的「取当期订单」。抓完会自动弹出看板窗口，数据在那里计算并渲染。</p>
+
+  <div class="warn" id="hint"></div>
+</div>
+<script>
+(function(){
+  var h = location.hash || '';
+  var initApi = decodeURIComponent((h.match(/api=([^&]+)/) || [])[1] || '');
+  var days = (h.match(/days=(\d+)/) || [])[1] || '17';
+  var inp = document.getElementById('apiIn');
+  var a = document.getElementById('bm');
+  var hint = document.getElementById('hint');
+
+  function render() {
+    var api = (inp.value || '').trim().replace(/\/+$/, '');
+    var code = "(function(){var d=document,s=d.createElement('script');"
+      + (api ? "d.documentElement.setAttribute('data-oc-api','" + api + "');" : "")
+      + "s.src='" + location.origin + "/live/agent.js?v=3&days=" + days + "';"
+      + "d.head.appendChild(s);})();";
+    a.href = 'javascript:' + code;
+    if (!api) {
+      hint.innerHTML = '还没填接口地址。不填也能装，但点下去只会提示「找不到接口地址」'
+        + '（除非你在此之前已经在页面上点过一次「搜 索」）。';
+    } else if (!/^https?:\/\//.test(api)) {
+      hint.innerHTML = '地址要以 <code>https://</code> 开头。';
+    } else {
+      hint.innerHTML = '已就绪。书签里只存这个地址，不存任何账号或口令；'
+        + '登录态由浏览器自己带着（HttpOnly，脚本读不到）。';
+    }
+  }
+  inp.value = initApi;
+  inp.addEventListener('input', render);
+  render();
+})();
+</script>
+</body></html>
+"""
+
+
 def build(out_dir: Path, password: str) -> tuple[Path, Path]:
     import dashboard
 
@@ -196,12 +288,32 @@ def build(out_dir: Path, password: str) -> tuple[Path, Path]:
 
     if "</body>" not in html:
         raise SystemExit("模板里找不到 </body>")
-    html = html.replace("</body>", LOCK_HTML + UNLOCK_JS + "</body>", 1)
+    # 顺序有讲究：先放锁屏 DOM，再挂 live.js（它会摘掉锁屏），最后才是解密引导
+    html = html.replace("</body>",
+                        LOCK_HTML
+                        + '<script src="live/live.js?v=3"></script>\n'
+                        + UNLOCK_JS + "</body>", 1)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "index.html").write_text(html, encoding="utf-8")
     blob = encrypt(payload, password)
     (out_dir / "data.bin").write_bytes(blob)
+
+    # 本地实时模式的静态资源：代理脚本 + 计算链源码
+    live_out = out_dir / "live"
+    live_out.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for name in ("agent.js", "live.js", "pipeline.py"):
+        src = LIVE_SRC / name
+        if src.exists():
+            (live_out / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            copied.append(name)
+    for name in LIVE_DEPS:
+        src = BASE_DIR / name
+        if src.exists():
+            (live_out / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            copied.append(name)
+    (out_dir / "install.html").write_text(INSTALL_HTML, encoding="utf-8")
 
     # 顺手放一个禁止搜索引擎收录的标记，避免链接被爬到
     (out_dir / "robots.txt").write_text("User-agent: *\nDisallow: /\n", encoding="utf-8")
@@ -209,6 +321,8 @@ def build(out_dir: Path, password: str) -> tuple[Path, Path]:
     print(f"[site] index.html  {len(html)/1048576:.2f} MB")
     print(f"[site] data.bin    {len(blob)/1024:.0f} KB（gzip {len(gzip.compress(json.dumps(payload, ensure_ascii=False).encode('utf-8'), 9))/1024:.0f} KB）")
     print(f"[site] 订单 {len(orders)} 单 · 口令 {len(password)} 位 · PBKDF2 {ITERATIONS} 次")
+    print(f"[site] live/        {len(copied)} 个文件（agent.js + 计算链源码）")
+    print(f"[site] install.html 书签安装页；实时入口 /?live=1")
     return out_dir / "index.html", out_dir / "data.bin"
 
 

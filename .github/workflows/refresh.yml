@@ -115,18 +115,23 @@ jobs:
         run: |
           test -s site/index.html || { echo "index.html 缺失"; exit 1; }
           test -s site/data.bin    || { echo "data.bin 缺失"; exit 1; }
+          # 本地实时模式：代理脚本与计算链源码要一起发布
+          for f in site/live/agent.js site/live/live.js site/live/pipeline.py \
+                   site/live/scraper.py site/install.html; do
+            test -s "$f" || { echo "缺少 $f"; exit 1; }
+          done
           # 双保险：模板里不能残留业务数据
           if grep -q '"ocOrderNo"' site/index.html; then
             echo "index.html 里残留了订单数据，拒绝发布"; exit 1
           fi
-          # 三保险：内部系统域名不能出现在公开页面里
+          # 三保险：内部系统域名不能出现在公开产物里（含 live/ 下的脚本与源码）
           for u in "$OC_HOST_US" "$OC_PORTAL" "$OC_SSO_URL"; do
             h=$(printf '%s' "$u" | sed -E 's#^https?://##; s#/.*##')
-            if [ -n "$h" ] && grep -qF "$h" site/index.html; then
+            if [ -n "$h" ] && grep -rqF "$h" site/ 2>/dev/null; then
               echo "产物里泄漏了内部域名 $h，拒绝发布"; exit 1
             fi
           done
-          ls -lh site/
+          ls -lh site/ site/live/
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

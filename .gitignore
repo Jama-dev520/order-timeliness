@@ -20,6 +20,9 @@ dashboard.html
 *.html
 _data_tmp/
 
+# 测试截图
+data/_*.png
+
 # 发布产物：由 Actions 每次现场 build（build_site.py --out site），不入库。
 # 仓库里留着旧的 data.bin 只会让 clone 变大，而且口令一换旧密文就是垃圾。
 site/
