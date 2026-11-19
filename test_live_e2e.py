@@ -37,6 +37,8 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=3, help="取数窗口天数（测试用小的）")
     ap.add_argument("--dash", default="http://127.0.0.1:8123", help="看板地址（构建产物）")
     ap.add_argument("--headed", action="store_true")
+    ap.add_argument("--via-url", action="store_true",
+                    help="按真实书签方式从站点加载 agent.js（默认是内联注入）")
     ap.add_argument("--timeout", type=int, default=300)
     args = ap.parse_args()
 
@@ -68,6 +70,17 @@ def main() -> None:
         page.on("console", mk_logger("agent"))
         page.on("pageerror", lambda e: logs.append(f"[agent:pageerror] {str(e)[:300]}"))
 
+        # 新弹出的看板窗口从第一刻就接管日志（否则早期的加载失败会被漏掉）
+        def on_new_page(p):
+            p.on("console", mk_logger("dash"))
+            p.on("pageerror", lambda e: logs.append(f"[dash:pageerror] {str(e)[:300]}"))
+            p.on("requestfailed",
+                 lambda r: logs.append(f"[dash:reqfail] {r.url[:120]} {r.failure}"))
+            p.on("response",
+                 lambda r: logs.append(f"[dash:404] {r.url[:120]}") if r.status >= 400 else None)
+
+        ctx.on("page", on_new_page)
+
         print(f"[1] 打开内部页面 {ORDER_QUERY}")
         page.goto(ORDER_QUERY, wait_until="commit", timeout=90000)
         page.wait_for_timeout(2500)
@@ -75,11 +88,17 @@ def main() -> None:
         print(f"[2] 注入代理脚本（接口 {api} / 看板 {args.dash} / {args.days} 天）")
         t0 = time.time()
         page.evaluate(
-            "([api, dash, days]) => {"
-            "  document.documentElement.setAttribute('data-oc-api', api);"
-            "  window.__OC_DASH = dash; window.__OC_DAYS = days;"
-            "}", [api, args.dash, args.days])
-        page.add_script_tag(content=agent_js)
+            "([api]) => document.documentElement.setAttribute('data-oc-api', api)", [api])
+        if args.via_url:
+            # 与真实书签一致：从站点加载 agent.js，由它自己从 src 推导看板地址
+            url = args.dash.rstrip("/") + f"/live/agent.js?v=3&days={args.days}"
+            print(f"    via url: {url}")
+            page.add_script_tag(url=url)
+        else:
+            page.evaluate(
+                "([dash, days]) => { window.__OC_DASH = dash; window.__OC_DAYS = days; }",
+                [args.dash, args.days])
+            page.add_script_tag(content=agent_js)
 
         # 抓数期间靠页面上的面板文字看进度（agent.js 同时会打 [oc-live] 到 console）
         dash = None
@@ -110,22 +129,38 @@ def main() -> None:
             sys.exit(1)
 
         print(f"[3] 看板窗口已打开 {dash.url}")
-        dash.on("console", mk_logger("dash"))
-        dash.on("pageerror", lambda e: logs.append(f"[dash:pageerror] {str(e)[:300]}"))
 
         print(f"[4] 等本地计算与渲染（超时 {args.timeout}s）")
-        try:
-            dash.wait_for_function(
-                "() => window.ALL && window.ALL.length > 0", timeout=args.timeout * 1000)
-        except Exception as exc:  # noqa: BLE001
-            print(f"✗ 渲染超时：{exc}")
-            print("--- 面板文本 ---")
+        deadline = time.time() + args.timeout
+        st = {}
+        last = ""
+        while time.time() < deadline:
             try:
-                print(dash.evaluate("() => document.body.innerText.slice(0, 600)"))
+                st = dash.evaluate("""() => {
+                  var b=document.getElementById('__live_t'),
+                      s=document.getElementById('__live_s');
+                  return {all: (window.ALL||[]).length,
+                          box: !!document.getElementById('__live_box'),
+                          t: b ? b.textContent : '',
+                          s: s ? s.textContent : ''};
+                }""")
             except Exception:  # noqa: BLE001
-                pass
+                st = {}
+            cur = f"ALL={st.get('all')} box={st.get('box')} {st.get('t','')} | {st.get('s','')}"
+            if cur != last:
+                print(f"    {int(time.time()-t0):3d}s  {cur[:220]}")
+                last = cur
+            if st.get("all"):
+                break
+            if "失败" in (st.get("t") or ""):
+                break
+            time.sleep(0.6)
+
+        if not st.get("all"):
+            print(f"✗ 渲染未完成：{st.get('t','')} | {st.get('s','')}")
             print("--- 日志 ---")
             print("\n".join(logs[-25:]))
+            dash.screenshot(path=str(BASE / "data" / "_live_fail.png"))
             ctx.close()
             sys.exit(1)
 

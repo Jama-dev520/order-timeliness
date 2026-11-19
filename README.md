@@ -596,12 +596,16 @@ python build_site.py --out dist         # 换输出目录
 
 一次性配置：
 
-1. 建仓库（**建议私有**；公开也能用，因为 `site/` 里只有密文），把本目录推上去
-2. `Settings → Secrets and variables → Actions` 加两条：
-   - `OC_COOKIE`：`.env` 里那一整行 `hk-sit=xxxx-...`
+1. 建仓库并 push（公开仓实测可用：`site/` 里只有模板与密文，`.env`、`data/`、`site/` 都不入库）
+2. `Settings → Secrets and variables → Actions` 加 5 条：
+   - `OC_COOKIE`：`.env` 里那一整行 `hk-sit=xxxx-...`（**要带 `hk-sit=` 前缀**，共 43 字符）
    - `OC_SITE_PASSWORD`：看板口令
+   - `OC_HOST_US` / `OC_PORTAL` / `OC_SSO_URL`：接口地址、后台门户、登录入口
 3. `Settings → Pages → Source` 选 **GitHub Actions**
 4. `Actions → refresh-dashboard → Run workflow` 跑第一次
+
+> Secret 值务必用 `gh secret set` 或 stdin 写入。GitHub 网页的值是多行输入框，
+> 粘贴时很容易带进行尾空白，症状是 `Host '***' contains invalid character ' '`。
 
 几点要知道：
 
@@ -611,6 +615,65 @@ python build_site.py --out dist         # 换输出目录
 - 工作流不往仓库里提交数据，只上传 Pages artifact，所以仓库不会随时间膨胀。
 - 免费额度：私有仓库 2000 分钟/月，每次完整刷新约 15 分钟 × 12 次/天 ≈ 超额度；
   **公开仓库的 Actions 不计分钟**，所以想保持 2 小时频率就把仓库设为公开（内容已经是密文）。
+
+## 本地取数（书签，token 不进服务器）
+
+上面那套是**中央抓数**：cookie 存在 GitHub Secret 里，到期要人换。
+这套是**本地取数**：使用方在自己已登录的内部页面上点一下书签，用**浏览器自己的登录态**取数，
+token 既不进服务器也不需要维护。
+
+### 为什么可行（实测，不是推测）
+
+| 探测项 | 结果 |
+|---|---|
+| 从内部系统页面（`oc-uk`）里 `fetch` 内部接口 | `success=true`，CORS 放行，带 `allow-credentials: true` |
+| 换 `evil.example.com` / `null`（`file://` 的 origin） | **403**，无 CORS 头 |
+| `hk-sit` 能否被页面 JS 读到 | **不能**（HttpOnly），但浏览器发请求时自动带上 |
+| 内部页面 CSP | 无（只有 HSTS），脚本不会被拦 |
+| jsdelivr 可达性 / Pyodide 启动 | 3.4 MB/s，加载运行时 5.4 秒 |
+
+也就是说：跨域白名单是按域名配的，只有跑在内部系统页面里的脚本能读数据；而这个脚本
+**碰不到 token**（HttpOnly），token 也不会离开浏览器。
+
+### 四步使用
+
+1. 打开 `https://<站点>/install.html`，填接口地址（`…-api.` 开头那个域名）
+2. 把「取当期订单」按钮**拖到书签栏**
+3. 登录内部系统 → 进**订单综合查询**页面（必须是 `oc-` 开头那个系统，别的域不在白名单里）
+4. 点书签，抓完自动弹出看板窗口
+
+接口地址也可以不填：脚本会依次尝试 `localStorage` 里上次用过的地址、页面网络记录里的
+接口请求（即使用者先点过一次「搜 索」的情况）。
+
+### 口径为什么不漂移
+
+浏览器里跑 Python（Pyodide），**直接 import 现有的 `scraper.py` 与三个异常脚本**，
+调用 `build_meta()` / `analyze()`，一行业务逻辑都没有重写：
+
+```
+live/agent.js    在内部页面里抓 list + events，postMessage 交给看板窗口
+live/live.js     看板窗口：握手 → 载入 Pyodide → pipeline.compute() → 渲染
+live/pipeline.py 把网络层换成内存里已抓到的数据，其余原样调用
+```
+
+回归测试（`test_live_pipeline.py`）用同一份真实数据分别跑「本地 collect」和
+「实时 payload」，逐字段比对：**156 单全字段一致**，零漂移。
+
+### 实测速度
+
+2 天窗口 / 558 单：抓数 45 秒（列表并发 8、事件并发 12），本地计算 4.2 秒。
+17 天窗口约 1100 单，抓数 4–6 分钟，计算 8–10 秒。
+
+### 与中央抓数的取舍
+
+| | 中央抓数（Actions） | 本地取数（书签） |
+|---|---|---|
+| token | GitHub Secret | 不存在（HttpOnly，浏览器自持） |
+| 数据落地 | Pages 上的密文 | 使用方浏览器内存 |
+| 更新 | 每 2 小时自动 | 每次手动点一下 |
+| 失效 | cookie 约 4 天要换 | 只要还能登录内部系统就一直能用 |
+
+两套并存，互不影响：`/` 是加密成品（给看不了内网的人），`/?live=1` 是实时模式（给内部同事）。
 
 ## 私有 K8S 部署
 

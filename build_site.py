@@ -236,6 +236,8 @@ INSTALL_HTML = r"""<!doctype html>
   var h = location.hash || '';
   var initApi = decodeURIComponent((h.match(/api=([^&]+)/) || [])[1] || '');
   var days = (h.match(/days=(\d+)/) || [])[1] || '17';
+  // 站点可能挂在子路径下（GitHub Pages 是 /<repo>/），必须按当前目录拼，不能写死根路径
+  var BASE = location.origin + location.pathname.replace(/[^/]*$/, '');
   var inp = document.getElementById('apiIn');
   var a = document.getElementById('bm');
   var hint = document.getElementById('hint');
@@ -244,7 +246,7 @@ INSTALL_HTML = r"""<!doctype html>
     var api = (inp.value || '').trim().replace(/\/+$/, '');
     var code = "(function(){var d=document,s=d.createElement('script');"
       + (api ? "d.documentElement.setAttribute('data-oc-api','" + api + "');" : "")
-      + "s.src='" + location.origin + "/live/agent.js?v=3&days=" + days + "';"
+      + "s.src='" + BASE + "live/agent.js?v=3&days=" + days + "';"
       + "d.head.appendChild(s);})();";
     a.href = 'javascript:' + code;
     if (!api) {

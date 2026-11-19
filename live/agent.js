@@ -19,9 +19,16 @@
   }
 
   var SELF = document.currentScript;
-  // 正常情况从自己的 src 推导看板地址；以「内联注入」方式调试时用 __OC_DASH 兜底
+  // 正常情况从自己的 src 推导看板地址；以「内联注入」方式调试时用 __OC_DASH 兜底。
+  // 注意要拆成两个：origin 用于 postMessage 校验，base 用于拼落地的看板 URL
+  // （GitHub Pages 是 /<repo>/ 子路径，两者不能混用）。
   var SRC = (SELF && SELF.src) ? SELF.src : '';
-  var DASH = SRC ? new URL(SRC).origin : (window.__OC_DASH || '');
+  var DEBUG_DASH = window.__OC_DASH || '';
+  var DASH_BASE = SRC ? SRC.replace(/\/live\/agent\.js.*$/, '')
+                      : (DEBUG_DASH || '');
+  var DASH_ORIGIN = (function () {
+    try { return new URL(DASH_BASE).origin; } catch (e) { return DASH_BASE; }
+  })();
   var VER = SRC ? (new URL(SRC).searchParams.get('v') || '1') : '1';
   var DAYS = SRC ? (+new URL(SRC).searchParams.get('days') || 17)
                  : (+window.__OC_DAYS || 17);
@@ -275,14 +282,14 @@
 
   /* ---------------- 交给看板窗口 ---------------- */
   function handoff(data) {
-    var w = window.open(DASH + '/?live=1&v=' + VER, '_blank');
+    var w = window.open(DASH_BASE + '/?live=1&v=' + VER, '_blank');
     if (!w) { st.busy = false; say('弹窗被拦截', '请允许本站弹窗后重试'); return; }
     var sent = false, tries = 0;
 
     function onMsg(e) {
-      if (e.origin !== DASH) return;
+      if (e.origin !== DASH_ORIGIN) return;
       if (!e.data || e.data.type !== 'oc-live-ready') return;
-      e.source.postMessage({type: 'oc-live-data', payload: data}, DASH);
+      e.source.postMessage({type: 'oc-live-data', payload: data}, DASH_ORIGIN);
       sent = true;
       cleanup();
       done('已交给看板窗口', '计算与渲染在那边完成，本页可以关掉了', 6000);
@@ -299,7 +306,7 @@
         if (!sent) { st.busy = false; say('看板窗口没有响应', '请检查是否被拦截，或手动打开看板后重试'); }
         return;
       }
-      try { w.postMessage({type: 'oc-live-ping'}, DASH); } catch (e) {}
+      try { w.postMessage({type: 'oc-live-ping'}, DASH_ORIGIN); } catch (e) {}
     }, 1000);
   }
 
