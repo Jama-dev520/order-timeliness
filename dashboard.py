@@ -3029,6 +3029,9 @@ def render(meta: dict, orders: list, dynamic: bool = False, readonly: bool = Fal
         }
     extra_js = ""
     # 静态版：把接口原始事件嵌进 HTML，抽屉离线也能看到原始数据（默认只嵌最近 7 天）
+    # 体积账（2026-11-19 实测）：raw_map 3.18MB + orders 2.15MB ≈ 5.55MB。
+    # 「完全不嵌」的方案讨论过、决定暂不做；真要关，把下面 raw_map 强制置空即可——
+    # 离线抽屉会退化成里程碑视图，本机起着 serve.py 时仍会走 /api/track 现拉全量。
     raw_map, raw_snap = ({}, "")
     raw_cut, raw_days = ("", 0)
     if not dynamic:
