@@ -55,6 +55,7 @@ import json
 import os
 import random
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -887,21 +888,44 @@ def fetch_list(s, start, end, page=1, limit=100, cfg=None):
     return res.get("list") or [], int(res.get("total") or 0)
 
 
-def fetch_events(s, tn, cfg=None):
+def fetch_list_retry(s, start, end, page=1, limit=100, cfg=None, tries=3):
+    """翻页偶发超时：重试几次再放过。
+
+    不加这个，整轮抓数会白跑——实测本地网络下抓到第 14 页时 Read timed out，
+    前面 1200 多单已经拿到手，后面三张清单和 dashboard.html 全都不生成。
+    """
+    last: Exception | None = None
+    for i in range(tries):
+        try:
+            return fetch_list(s, start, end, page=page, limit=limit, cfg=cfg)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if i + 1 < tries:
+                wait = 2 * (i + 1)
+                print(f"[real] 第 {page} 页失败（{type(exc).__name__}），{wait}s 后重试")
+                time.sleep(wait)
+    raise last if last else RuntimeError("fetch_list_retry 未知失败")
+
+
+def fetch_events(s, tn, cfg=None, tries: int = 3):
     if not tn:
         return []
-    try:
-        r = s.get(_url(API["events"].format(tn=tn), cfg), timeout=40)
-        r.raise_for_status()
-        res = r.json().get("result") or []
-        return res if isinstance(res, list) else []
-    except Exception:  # noqa: BLE001
-        return []
+    for i in range(tries):
+        try:
+            r = s.get(_url(API["events"].format(tn=tn), cfg), timeout=40)
+            r.raise_for_status()
+            res = r.json().get("result") or []
+            return res if isinstance(res, list) else []
+        except Exception:  # noqa: BLE001
+            # 单条事件拿不到会让这一单的里程碑缺失（口径静默偏空），先重试再放弃
+            if i + 1 < tries:
+                time.sleep(1.2 * (i + 1))
+    return []
 
 
 def fetch_one_region(s, cfg, date_from, date_to, max_orders=0, workers=12) -> list[dict]:
     try:
-        first, total = fetch_list(s, date_from, date_to, cfg=cfg)
+        first, total = fetch_list_retry(s, date_from, date_to, cfg=cfg)
     except Exception as exc:  # noqa: BLE001
         print(f"[real] {cfg['code']} 列表接口失败：{exc}")
         print(f"       地址 {_url(API['list'], cfg)}")
@@ -924,7 +948,7 @@ def fetch_one_region(s, cfg, date_from, date_to, max_orders=0, workers=12) -> li
     while len(records) < total and first:
         if max_orders and len(records) >= max_orders:
             break
-        batch, _ = fetch_list(s, date_from, date_to, page=page, limit=100, cfg=cfg)
+        batch, _ = fetch_list_retry(s, date_from, date_to, page=page, limit=100, cfg=cfg)
         if not batch:
             break
         records.extend(batch)
