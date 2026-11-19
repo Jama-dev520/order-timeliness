@@ -2452,13 +2452,16 @@ window.OCRefresh = (function(){
     }).catch(function(){ return null; });
   }
 
-  // cron 是 `23 */2 * * *`（UTC 每两小时的第 23 分）。东八区对齐后仍是偶数小时的 23 分。
+  // cron 是 `23 */2 * * *`，**UTC** 每两小时的第 23 分。必须先在 UTC 上对齐，
+  // 再交给 Date 显示成本地时间——否则换个时区的浏览器会算出错误的下次时间。
   function nextRun(){
-    var now = new Date(), c = new Date(now.getTime());
-    c.setMinutes(23, 0, 0);
-    if (c <= now) c.setHours(c.getHours() + 1);
-    while (c.getHours() % 2 !== 0) c.setHours(c.getHours() + 1);
-    return c;
+    var now = new Date();
+    var u = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+                              now.getUTCHours(), now.getUTCMinutes(), 0, 0));
+    u.setUTCMinutes(23, 0, 0);
+    if (u <= now) u.setUTCHours(u.getUTCHours() + 1);
+    while (u.getUTCHours() % 2 !== 0) u.setUTCHours(u.getUTCHours() + 1);
+    return u;
   }
   function hhmm(d){
     return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
