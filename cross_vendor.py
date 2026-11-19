@@ -121,7 +121,8 @@ def collect(start: str, end: str, cache: Path | None = None) -> tuple[list[dict]
 
     if cache and cache.exists():
         blob = json.loads(cache.read_text(encoding="utf-8"))
-        pairs = [(x["rec"], x["evs"]) for x in blob]
+        pairs = [(x["rec"], x["evs"]) for x in blob
+                 if str((x.get("rec") or {}).get("_region") or "us").lower() == "us"]
         print(f"[cache] 复用 {cache.name}：{len(pairs)} 单", flush=True)
     else:
         s = sc._session()

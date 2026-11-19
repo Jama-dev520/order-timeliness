@@ -84,8 +84,13 @@ def analyze(rec: dict, events: list, cfg: dict) -> dict | None:
     }
 
 
-def load_pairs(orders: list[dict], cfg: dict, cache: Path, workers: int) -> list[tuple]:
-    """取每单的事件链：优先用缓存，缺失的单再打接口补。"""
+def load_pairs(orders: list[dict], cfg: dict, cache: Path, workers: int,
+               share: Path | None = None) -> list[tuple]:
+    """取每单的事件链：优先用缓存，缺失的单再打接口补。
+
+    share：整轮抓数刚写下的 `data/_ev_run.json`（refresh_all 传 --share）。
+    里面有本轮全部单的原始事件，直接灌进 cached 就不必再发请求了。
+    """
     cached: dict[str, list] = {}
     if cache.exists():
         try:
@@ -97,6 +102,21 @@ def load_pairs(orders: list[dict], cfg: dict, cache: Path, workers: int) -> list
             print(f"[cache] {cache.name}：{len(cached)} 单", flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[cache] 读取失败，忽略：{exc}", flush=True)
+
+    if share and Path(share).exists():
+        try:
+            blob = json.loads(Path(share).read_text(encoding="utf-8"))
+            added = 0
+            for x in blob:
+                rec = x.get("rec") or {}
+                tn = str(rec.get("trackingNumber") or rec.get("lastMileWaybill") or "")
+                evs = x.get("evs") or []
+                if tn and evs and tn not in cached:
+                    cached[tn] = evs
+                    added += 1
+            print(f"[share] 复用本轮快照 {Path(share).name}：补入 {added} 单", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[share] 读取失败，忽略：{exc}", flush=True)
 
     todo = [o for o in orders if o.get("lastMileWaybill") not in cached]
     if todo:
@@ -116,6 +136,9 @@ def load_pairs(orders: list[dict], cfg: dict, cache: Path, workers: int) -> list
                 if i % 50 == 0:
                     print(f"[ev] {i}/{len(todo)}", flush=True)
 
+    # 只要本轮有新事件（自己补拉的，或从 --share 灌进来的），就刷新这份日缓存：
+    # dashboard.py 内嵌原始事件读的就是最新的 _ev_cache_lms_*.json
+    if cached and (todo or share):
         cache.write_text(json.dumps(
             [{"rec": {"lastMileWaybill": k}, "evs": v} for k, v in cached.items()],
             ensure_ascii=False), encoding="utf-8")
@@ -128,6 +151,8 @@ def main():
     ap = argparse.ArgumentParser(description="标记建单+投递都是 LMS 的单")
     ap.add_argument("--no-cache", action="store_true", help="忽略事件缓存，全部重拉")
     ap.add_argument("--workers", type=int, default=12)
+    ap.add_argument("--share", default=None,
+                    help="复用整轮抓数的事件快照（data/_ev_run.json），不再发请求")
     a = ap.parse_args()
 
     snap = json.loads((DATA / "orders.json").read_text(encoding="utf-8"))
@@ -139,7 +164,7 @@ def main():
     cache = DATA / f"_ev_cache_lms_{datetime.now().strftime('%Y%m%d')}.json"
     if a.no_cache and cache.exists():
         cache.unlink()
-    pairs = load_pairs(orders, cfg, cache, a.workers)
+    pairs = load_pairs(orders, cfg, cache, a.workers, share=a.share)
 
     rows, both_lm, no_create, no_drop = [], 0, 0, 0
     combo = Counter()

@@ -923,7 +923,73 @@ def fetch_events(s, tn, cfg=None, tries: int = 3):
     return []
 
 
-def fetch_one_region(s, cfg, date_from, date_to, max_orders=0, workers=12) -> list[dict]:
+EV_RUN = DATA_DIR / "_ev_run.json"
+
+
+def load_ev_run(path=None) -> dict[str, list]:
+    """读上一轮抓数留下的「运单号 → 原始事件流」快照。
+
+    格式与 `_ev_cache_lms_*.json` 一致（`[{"rec": ..., "evs": ...}]`），
+    所以 cross_vendor / dropoff_cancel 的 `--cache` 能直接吃这个文件。
+    """
+    p = Path(path) if path else EV_RUN
+    if not p.exists():
+        return {}
+    try:
+        blob = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for item in blob or []:
+        rec = item.get("rec") or {}
+        tn = str(rec.get("trackingNumber") or rec.get("lastMileWaybill") or "")
+        evs = item.get("evs")
+        if tn and isinstance(evs, list) and evs:
+            out[tn] = evs
+    return out
+
+
+def save_ev_run(pairs, path=None) -> Path:
+    """把本轮实际拿到的 (rec, evs) 落盘，供下游脚本复用，避免各拉一遍。
+
+    `rec` 是列表接口原始行（含收件人信息），文件在 `data/` 下且已被 .gitignore 排除。
+    """
+    p = Path(path) if path else EV_RUN
+    payload = [{"rec": rec, "evs": evs or []} for rec, evs in pairs]
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(p)
+    return p
+
+
+def load_prev_delivered(path=None) -> dict[str, str]:
+    """从上一轮 orders.json 取「运单号 → 妥投时间」，用于判断哪些单不必再拉事件。"""
+    p = Path(path) if path else (DATA_DIR / "orders.json")
+    if not p.exists():
+        return {}
+    try:
+        blob = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for o in (blob.get("orders") if isinstance(blob, dict) else blob) or []:
+        tn = str(o.get("lastMileWaybill") or o.get("ocOrderNo") or "")
+        dt = o.get("deliveredTime")
+        if tn and dt:
+            out[tn] = dt
+    return out
+
+
+def fetch_one_region(s, cfg, date_from, date_to, max_orders=0, workers=12,
+                     skip: set | None = None, reuse: dict | None = None,
+                     dump: list | None = None) -> list[dict]:
+    """抓一个区域。skip/reuse 命中时跳过事件请求，改用上一轮的快照。
+
+    skip 里的单必须是**已妥投且妥投超过 N 天**（妥投是终态，事件不会再变），
+    且 reuse 里必须真有这单的事件流 —— 宁可多抓一次，也不能让里程碑凭空消失。
+    """
+    skip = skip or set()
+    reuse = reuse or {}
     try:
         first, total = fetch_list_retry(s, date_from, date_to, cfg=cfg)
     except Exception as exc:  # noqa: BLE001
@@ -957,23 +1023,62 @@ def fetch_one_region(s, cfg, date_from, date_to, max_orders=0, workers=12) -> li
             break
     if max_orders:
         records = records[:max_orders]
-    print(f"[real] {cfg['code']} 已取 {len(records)} 单，开始拉事件明细…")
+
+    n_skip = sum(1 for r in records
+                 if (r.get("trackingNumber") or "") in skip)
+    print(f"[real] {cfg['code']} 已取 {len(records)} 单，开始拉事件明细…"
+          + (f"（{n_skip} 单已妥投超 3 天，复用上轮事件）" if n_skip else ""))
+
+    def work(r):
+        tn = r.get("trackingNumber") or ""
+        if tn in skip:
+            return reuse.get(tn) or []
+        return fetch_events(s, tn, cfg)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        event_lists = list(pool.map(lambda r: fetch_events(s, r.get("trackingNumber", ""), cfg), records))
+        event_lists = list(pool.map(work, records))
 
+    if dump is not None:
+        # 带上区域标记：一份快照服务多个脚本，各自只该看到自己区域的单
+        dump.extend((dict(rec, _region=cfg["code"].lower()), evs)
+                    for rec, evs in zip(records, event_lists))
     return [normalize_order(rec, evs, cfg) for rec, evs in zip(records, event_lists)]
 
 
-def fetch_real(date_from: str, date_to: str, max_orders: int = 0, workers: int = 12) -> list[dict]:
+def fetch_real(date_from: str, date_to: str, max_orders: int = 0, workers: int = 12,
+               skip_delivered_days: int = 0, dump_events: bool = False) -> list[dict]:
     if not COOKIE:
         print("[real] 缺少登录态：请在 .env 里填 OC_COOKIE（浏览器 Cookie 里的 hk-sit=...）")
         sys.exit(2)
 
     s = _session()
     orders: list[dict] = []
+    skip, reuse, dump = set(), {}, None
+    if skip_delivered_days and skip_delivered_days > 0:
+        reuse = load_ev_run()
+        prev = load_prev_delivered()
+        cut = datetime.now(TZ_CN) - timedelta(days=skip_delivered_days)
+        for tn, dt in prev.items():
+            t = parse_time(dt)
+            if t and t <= cut and tn in reuse:
+                skip.add(tn)
+        if skip:
+            print(f"[real] 跳过 {len(skip)} 单已妥投超 {skip_delivered_days} 天的事件请求"
+                  f"（直接用上轮快照，共 {len(reuse)} 单可复用）")
+        else:
+            print(f"[real] 暂无可跳过的事件请求（上轮快照 {len(reuse)} 单）")
+    if dump_events:
+        dump = []
+
     for key in active_regions():
-        orders.extend(fetch_one_region(s, region_cfg(key), date_from, date_to, max_orders, workers))
+        orders.extend(fetch_one_region(s, region_cfg(key), date_from, date_to,
+                                       max_orders, workers, skip=skip, reuse=reuse,
+                                       dump=dump))
+
+    if dump is not None:
+        p = save_ev_run(dump)
+        print(f"[real] 事件快照已写入 {p.name}（{len(dump)} 单，"
+              f"{p.stat().st_size / 1048576:.1f}MB），下游复用这一份")
 
     orders.sort(key=lambda o: (o["region"], o["orderCreateTime"]))
     mark_tests(orders)

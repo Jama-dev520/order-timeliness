@@ -84,8 +84,18 @@ def main() -> int:
     start, end = window()
     log(f"抓取窗口 {start} ~ {end}")
 
+    # 已妥投超过 N 天的单不再拉事件：妥投是终态，事件不会再变，直接复用上一轮快照。
+    # 设 0 可关闭（整轮全抓）。实测这类单约占 15%，而事件请求是耗时主体。
     try:
-        orders = sc.fetch_real(start, end, 0)
+        skip_days = int(os.getenv("OC_SKIP_DELIVERED_DAYS", "3"))
+    except ValueError:
+        skip_days = 3
+    if skip_days > 0:
+        log(f"已妥投超 {skip_days} 天的单将跳过事件请求（OC_SKIP_DELIVERED_DAYS=0 可关闭）")
+
+    try:
+        orders = sc.fetch_real(start, end, 0, skip_delivered_days=skip_days,
+                               dump_events=True)
     except Exception as exc:  # noqa: BLE001
         # 后台对 startDate 有下限（实测 2026/10/19，约「今天往前 17 天」）。写得更早时不仅不给数据，
         # 还会静默返回全库；scraper 的守卫会抛错，这里自动收缩窗口重试一次，避免定时任务直接挂掉。
@@ -94,7 +104,8 @@ def main() -> int:
             log(f"起始日 {start} 超出接口下限，本次改用 {fb} 重试（明细起点会自动收缩）")
             start = fb
             try:
-                orders = sc.fetch_real(start, end, 0)
+                orders = sc.fetch_real(start, end, 0, skip_delivered_days=skip_days,
+                                       dump_events=True)
             except Exception as exc2:  # noqa: BLE001
                 log(f"抓取异常：{exc2}")
                 return 3
@@ -111,19 +122,26 @@ def main() -> int:
     log(f"订单快照已更新：{len(orders)} 单")
 
     # 取消清单：订单刚抓成功说明登录态正常，这步失败不影响主流程
+    # 下面三个清单原本各自重拉一遍列表+事件（等于整轮抓 4 遍），现在统一复用
+    # 刚才 fetch_real 落下的 data/_ev_run.json —— 同一份事件，口径完全一致。
+    ev_cache = BASE / "data" / "_ev_run.json"
+    cache_args = ["--cache", str(ev_cache)] if ev_cache.exists() else []
+    if not cache_args:
+        log("警告：事件快照缺失，下游脚本将自行重拉事件（会明显变慢）")
+
     env = dict(os.environ)
     env.setdefault("STUCK_HTML_OUT", str(BASE / "data" / "stuck_shipcc.html"))
     cmd = [sys.executable, str(BASE / "stuck_shipcc.py"),
-           "--from", start[:10], "--to", end[:10]]
+           "--from", start[:10], "--to", end[:10]] + cache_args
     log("重算取消清单 …")
     rc = subprocess.run(cmd, cwd=str(BASE), env=env).returncode
     if rc != 0:
         log(f"取消清单重算失败（退出码 {rc}），订单快照不受影响")
 
-    # 串场检测：PUDO 点投递 → LMS 司机取走。要重拉事件，失败只跳过这一项
+    # 串场检测：PUDO 点投递 → LMS 司机取走。失败只跳过这一项
     log("重算串场单（PUDO 投递 → LMS 取件）…")
     rc = subprocess.run([sys.executable, str(BASE / "cross_vendor.py"),
-                         "--from", start[:10], "--to", end[:10]],
+                         "--from", start[:10], "--to", end[:10]] + cache_args,
                         cwd=str(BASE), env=env).returncode
     if rc != 0:
         log(f"串场检测失败（退出码 {rc}），其余数据不受影响")
@@ -132,16 +150,18 @@ def main() -> int:
     log("重算投递取消异常清单 …")
     env.setdefault("DROPOFF_HTML_OUT", str(BASE / "data" / "dropoff_cancel.html"))
     rc = subprocess.run([sys.executable, str(BASE / "dropoff_cancel.py"),
-                         "--from", start[:10], "--to", end[:10]],
+                         "--from", start[:10], "--to", end[:10]] + cache_args,
                         cwd=str(BASE), env=env).returncode
     if rc != 0:
         log(f"投递取消异常清单重算失败（退出码 {rc}），其余数据不受影响")
 
     # LMS 同供：建单(OCUS001)与投递(DOUS002/DOUD002)的 vendorCode 都是 LM。
-    # 读的是刚写好的 orders.json，事件本身有缓存，只补新单
+    # 读的是刚写好的 orders.json，事件优先取本轮快照，只补快照里没有的单
     log("重算 LMS 同供标记 …")
-    rc = subprocess.run([sys.executable, str(BASE / "lms_same_vendor.py")],
-                        cwd=str(BASE), env=env).returncode
+    lms_cmd = [sys.executable, str(BASE / "lms_same_vendor.py")]
+    if ev_cache.exists():
+        lms_cmd += ["--share", str(ev_cache)]
+    rc = subprocess.run(lms_cmd, cwd=str(BASE), env=env).returncode
     if rc != 0:
         log(f"LMS 同供标记重算失败（退出码 {rc}），其余数据不受影响")
 

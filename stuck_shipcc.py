@@ -64,19 +64,38 @@ def cn_desc(desc: str, code: str) -> str:
 
 
 def collect(region: str, days: int, date_from: str | None = None,
-            date_to: str | None = None) -> tuple[list[dict], list[dict], dict, str, str]:
+            date_to: str | None = None,
+            cache: str | None = None) -> tuple[list[dict], list[dict], dict, str, str]:
     start, end = sc._range(days, date_from, date_to)
     cfg = sc.region_cfg(region)
     s = sc._session()
 
-    recs, total, page = [], 0, 1
-    while True:
-        batch, total = sc.fetch_list(s, start, end, page=page, limit=100, cfg=cfg)
-        recs.extend(batch)
-        if len(batch) < 100 or len(recs) >= total:
-            break
-        page += 1
-    print(f"[{region}] 订单 {len(recs)} / {total}  {start} ~ {end}")
+    pairs = None
+    if cache and Path(cache).exists():
+        # 复用整轮抓数留下的事件快照（refresh_all 传 --cache），不再重拉列表与事件
+        blob = json.loads(Path(cache).read_text(encoding="utf-8"))
+        pairs = [(x.get("rec") or {}, x.get("evs") or []) for x in blob or []]
+        pairs = [(r, e) for r, e in pairs
+                 if str(r.get("_region") or region).lower() == region.lower()]
+        print(f"[cache] 复用 {Path(cache).name}：{len(pairs)} 单", flush=True)
+
+    if pairs is None:
+        recs, total, page = [], 0, 1
+        while True:
+            batch, total = sc.fetch_list(s, start, end, page=page, limit=100, cfg=cfg)
+            recs.extend(batch)
+            if len(batch) < 100 or len(recs) >= total:
+                break
+            page += 1
+        print(f"[{region}] 订单 {len(recs)} / {total}  {start} ~ {end}")
+
+        def work(rec):
+            return rec, sc.fetch_events(s, rec.get("trackingNumber") or "", cfg)
+
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            pairs = list(pool.map(work, recs))
+
+    recs = [r for r, _ in pairs]
 
     # 测试单标记要在全量订单上算，否则同地址推定拿不到上下文
     flags = sc.test_flags([
@@ -86,12 +105,6 @@ def collect(region: str, days: int, date_from: str | None = None,
         for r in recs
     ])
     test_by_wb = {r.get("trackingNumber") or "": f for r, f in zip(recs, flags)}
-
-    def work(rec):
-        return rec, sc.fetch_events(s, rec.get("trackingNumber") or "", cfg)
-
-    with ThreadPoolExecutor(max_workers=12) as pool:
-        pairs = list(pool.map(work, recs))
 
     hits, recovered = [], []
     with_code = 0
@@ -727,6 +740,8 @@ def main():
     ap.add_argument("--no-write", action="store_true")
     ap.add_argument("--render-only", action="store_true",
                     help="只用已有 data/stuck_shipcc.json 重新渲染页面，不重新抓取")
+    ap.add_argument("--cache", default=None,
+                    help="复用整轮抓数留下的事件快照（data/_ev_run.json），不再重拉")
     args = ap.parse_args()
 
     if args.render_only:
@@ -741,7 +756,7 @@ def main():
         d_to_arg = datetime.now(sc.TZ_CN).strftime("%Y/%m/%d")
 
     rows, recovered, stats, d_from, d_to = collect(
-        args.region, args.days, args.date_from, d_to_arg)
+        args.region, args.days, args.date_from, d_to_arg, cache=args.cache)
     grp = {"A": 0, "B": 0}
     for r in rows:
         grp[r["group"]] += 1
