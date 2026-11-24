@@ -138,5 +138,21 @@ jobs:
         with:
           path: site
 
-      - id: deploy
+      # artifacts 服务是「最终一致」的：上传成功后立刻部署，偶尔会查不到产物
+      # （报 `Found 0 artifact(s)`，v3 和 v5 都撞过，2026-11-23 起一天能碰两三回）。
+      # 所以先等几秒让产物注册完成，失败再重试两轮，别让一次抖动浪费整轮抓数。
+      - name: 等产物注册
+        run: sleep 20
+
+      - id: deploy1
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+
+      - id: deploy2
+        if: steps.deploy1.outcome == 'failure'
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+
+      - name: 部署（第三次尝试）
+        if: steps.deploy1.outcome == 'failure' && steps.deploy2.outcome == 'failure'
         uses: actions/deploy-pages@v5
