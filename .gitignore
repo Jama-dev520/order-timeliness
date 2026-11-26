@@ -9,6 +9,7 @@ data/_auth_state.json
 # 运行产物
 data/*.csv
 data/*.json
+data/*.xlsx
 !data/.gitkeep
 logs/
 __pycache__/
