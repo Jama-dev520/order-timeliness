@@ -56,7 +56,7 @@ def find_gh() -> str:
     raise SystemExit("找不到 gh（GitHub CLI）。请安装，或把路径加到 PATH。")
 
 
-def gh(*args: str, input_bytes: bytes | None = None, retries: int = 3) -> subprocess.CompletedProcess:
+def gh(*args: str, input_bytes: bytes | None = None, retries: int = 5) -> subprocess.CompletedProcess:
     """调 gh，网络抖动重试。"""
     exe = find_gh()
     last = None
@@ -68,7 +68,7 @@ def gh(*args: str, input_bytes: bytes | None = None, retries: int = 3) -> subpro
         last = cp
         err = (cp.stderr or b"").decode("utf-8", "replace")
         if any(t in err for t in ("TLS", "timeout", "connection", "Could not resolve")):
-            time.sleep(3 * (i + 1))
+            time.sleep(min(2 + 3 * i, 12))
             continue
         break
     err = (last.stderr or b"").decode("utf-8", "replace") if last else ""
@@ -105,7 +105,8 @@ def secret_updated_at() -> str:
             if it.get("name") == "OC_COOKIE":
                 return str(it.get("updatedAt") or "")
     except SystemExit:
-        raise
+        # 只是想知道「Secret 什么时候写的」，读不到就算了，别因此中止整次续期
+        return ""
     except Exception:  # noqa: BLE001
         pass
     return ""
@@ -122,8 +123,14 @@ def trigger(reason: str) -> int:
 
 
 def latest_run(since_ts: float) -> dict | None:
-    cp = gh("run", "list", "-R", REPO, "--limit", "5",
-            "--json", "databaseId,status,conclusion,createdAt,displayTitle")
+    try:
+        cp = gh("run", "list", "-R", REPO, "--limit", "5",
+                "--json", "databaseId,status,conclusion,createdAt,displayTitle",
+                retries=5)
+    except SystemExit:
+        # GitHub API 抖一下就返回 None，让 wait_run 继续轮询；
+        # 之前这里直接抛出去，会把「部署已经成功」误判成整次续期失败
+        return None
     runs = json.loads(cp.stdout.decode("utf-8", "replace") or "[]")
     return runs[0] if runs else None
 
@@ -135,8 +142,6 @@ def wait_run(timeout: int = 900) -> tuple[bool, str]:
     while time.time() - t0 < timeout:
         try:
             r = latest_run(t0)
-        except SystemExit:
-            raise
         except Exception:  # noqa: BLE001
             r = None
         if r:
